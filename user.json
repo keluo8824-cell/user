@@ -1,0 +1,8 @@
+{
+  "api_secret": "请改成与所有后台config.php相同的64位随机密钥",
+  "backends": [
+    "http://156.225.30.118:7778/",
+    "https://后台服务器2.example.com",
+    "https://后台服务器3.example.com"
+  ]
+}
