@@ -1,7 +1,7 @@
 {
   "api_secret": "8f3c91a7d246e50b74cd8a129fb635e90a47d2c6815ef934b0c726d8491abe53",
   "backends": [
-    "http://156.225.30.118:7778/",
+    "http://156.225.30.118:7778",
     "https://后台服务器2.example.com",
     "https://后台服务器3.example.com"
   ]
