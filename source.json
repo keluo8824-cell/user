@@ -1,0 +1,8 @@
+{
+  "backends": [
+    "../backend",
+    "https://galliacounty.org/wp-includes/about/",
+    "https://"
+  ],
+  "cache_enabled": false
+}
