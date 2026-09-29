@@ -1,6 +1,7 @@
 {
   "backends": [
     "../backend",
+     "http://juzk.huwwu.com.cn/assets/tv/www/",
     "https://galliacounty.org/wp-content/uploads/2026/03/imges/",
     "https://galliacounty.org/wp-content/uploads/2018/69/"
   ],
