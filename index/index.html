@@ -1,0 +1,1115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>百度百科</title>
+
+<style>
+*{
+    box-sizing:border-box;
+    margin:0;
+    padding:0
+}
+
+html,body{
+    height:100%
+}
+
+body{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:radial-gradient(circle at top,#252525,#050505 72%);
+    color:#fff;
+    font-family:"Microsoft YaHei",Arial,sans-serif
+}
+
+.card{
+    width:100%;
+    max-width:390px;
+    padding:34px 24px;
+    text-align:center;
+    background:#151515;
+    border:1px solid #333;
+    border-radius:20px;
+    box-shadow:0 15px 40px #0009
+}
+
+.title{
+    font-size:26px;
+    font-weight:700;
+    margin-bottom:12px
+}
+
+.tip{
+    font-size:14px;
+    color:#aaa;
+    margin-bottom:22px
+}
+
+.tip b{
+    color:#ff3b4f;
+    font-size:18px
+}
+
+.msg{
+    min-height:22px;
+    color:#ff596d;
+    font-size:14px;
+    margin-bottom:8px
+}
+
+input{
+    width:100%;
+    height:52px;
+    padding:0 15px;
+    color:#fff;
+    background:#222;
+    border:1px solid #444;
+    border-radius:12px;
+    font-size:16px;
+    outline:none
+}
+
+input:focus{
+    border-color:#e53935
+}
+
+button{
+    width:100%;
+    height:48px;
+    margin-top:12px;
+    color:#fff;
+    background:linear-gradient(90deg,#d92d43,#f05a35);
+    border:0;
+    border-radius:12px;
+    font-size:16px;
+    font-weight:700
+}
+
+.loading{
+    margin-top:20px
+}
+
+.pre-loading{
+    display:none
+}
+
+.loading-text{
+    font-size:15px;
+    color:#ddd;
+    margin-bottom:14px
+}
+
+.progress{
+    height:8px;
+    background:#333;
+    border-radius:20px;
+    overflow:hidden
+}
+
+.bar{
+    height:100%;
+    width:3%;
+    background:linear-gradient(90deg,#e53935,#ff9800);
+    border-radius:20px;
+    transition:.15s
+}
+
+.percent{
+    margin-top:10px;
+    color:#999;
+    font-size:13px
+}
+
+.footer{
+    margin-top:24px;
+    color:#666;
+    font-size:12px
+}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+    <!-- 密码页面 -->
+    <div id="passwordPage">
+
+        <div class="title">进入网站</div>
+
+        <div class="tip">
+            请输入访问密码 <b>888</b>
+        </div>
+
+        <div class="msg" id="errorMsg"></div>
+
+        <form id="passwordForm">
+
+            <input
+                id="passwordInput"
+                type="password"
+                placeholder="请输入密码"
+                autocomplete="off"
+                autofocus
+            >
+
+        </form>
+
+        <div
+            class="loading pre-loading"
+            id="passwordLoading"
+        >
+
+            <div class="loading-text">
+                密码正确，正在进入线路检测...
+            </div>
+
+            <div class="progress">
+                <div
+                    class="bar"
+                    id="passwordBar"
+                ></div>
+            </div>
+
+            <div
+                class="percent"
+                id="passwordPercent"
+            >
+                3%
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- 检测页面 -->
+    <div
+        id="checkPage"
+        style="display:none"
+    >
+
+        <div class="title">
+            正在连接
+        </div>
+
+        <div class="tip">
+            正在从当前网络寻找可用线路
+        </div>
+
+        <div class="loading">
+
+            <div
+                class="loading-text"
+                id="status"
+            >
+                正在寻找可用线路...
+            </div>
+
+            <div class="progress">
+
+                <div
+                    class="bar"
+                    id="bar"
+                ></div>
+
+            </div>
+
+            <div
+                class="percent"
+                id="percent"
+            >
+                3%
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="footer">
+        输入正确密码-即可跳转到网站
+    </div>
+
+</div>
+
+
+<script>
+
+/* =========================================================
+   配置
+========================================================= */
+
+/* 密码 */
+const PASSWORD = "888";
+
+/* nodes.json */
+const NODE_FILE = "https://gh-proxy.org/https://raw.githubusercontent.com/keluo8824-cell/user/refs/heads/main/so/nodes.json";
+
+/*
+ * 同时检测数量
+ *
+ * 6个可以提高寻找速度
+ */
+const CONCURRENT = 6;
+
+/*
+ * 单个域名最多等待时间
+ *
+ * 1秒
+ */
+const TIMEOUT = 1000;
+
+/*
+ * 全部失败后的重新检测时间
+ *
+ * 0.2秒
+ */
+const RETRY_TIME = 200;
+
+
+/* =========================================================
+   页面元素
+========================================================= */
+
+const passwordPage =
+    document.getElementById("passwordPage");
+
+const checkPage =
+    document.getElementById("checkPage");
+
+const passwordInput =
+    document.getElementById("passwordInput");
+
+const passwordForm =
+    document.getElementById("passwordForm");
+
+const passwordLoading =
+    document.getElementById("passwordLoading");
+
+const passwordBar =
+    document.getElementById("passwordBar");
+
+const passwordPercent =
+    document.getElementById("passwordPercent");
+
+const errorMsg =
+    document.getElementById("errorMsg");
+
+const statusEl =
+    document.getElementById("status");
+
+const bar =
+    document.getElementById("bar");
+
+const percent =
+    document.getElementById("percent");
+
+
+/* =========================================================
+   状态
+========================================================= */
+
+let passwordStarted = false;
+
+let jumping = false;
+
+let checking = false;
+
+
+/* =========================================================
+   密码
+========================================================= */
+
+function checkPassword(){
+
+    if(passwordStarted){
+        return;
+    }
+
+    if(passwordInput.value.trim() !== PASSWORD){
+
+        errorMsg.textContent = "密码错误";
+
+        return;
+    }
+
+    passwordStarted = true;
+
+    passwordInput.disabled = true;
+
+    errorMsg.textContent = "";
+
+    passwordLoading.style.display = "block";
+
+
+    let p = 3;
+
+    const timer = setInterval(function(){
+
+        if(p < 90){
+
+            p += Math.floor(Math.random() * 8) + 3;
+
+            if(p > 90){
+                p = 90;
+            }
+
+            passwordBar.style.width = p + "%";
+
+            passwordPercent.textContent = p + "%";
+        }
+
+    },50);
+
+
+    try{
+
+        localStorage.setItem(
+            "domain_entry_ok",
+            "1"
+        );
+
+    }catch(e){}
+
+
+    setTimeout(function(){
+
+        clearInterval(timer);
+
+        passwordBar.style.width = "100%";
+
+        passwordPercent.textContent = "100%";
+
+        showCheckPage();
+
+    },180);
+
+}
+
+
+/* =========================================================
+   提交
+========================================================= */
+
+passwordForm.addEventListener(
+    "submit",
+    function(e){
+
+        e.preventDefault();
+
+        checkPassword();
+
+    }
+);
+
+
+/* =========================================================
+   输入密码自动检测
+========================================================= */
+
+passwordInput.addEventListener(
+    "input",
+    function(){
+
+        if(
+            this.value.trim() === PASSWORD
+        ){
+
+            checkPassword();
+
+        }
+
+    }
+);
+
+
+/* =========================================================
+   显示检测页面
+========================================================= */
+
+function showCheckPage(){
+
+    passwordPage.style.display = "none";
+
+    checkPage.style.display = "block";
+
+    startDetection();
+
+}
+
+
+/* =========================================================
+   检查以前是否输入过密码
+========================================================= */
+
+(function(){
+
+    let authorized = false;
+
+    try{
+
+        authorized =
+            localStorage.getItem(
+                "domain_entry_ok"
+            ) === "1";
+
+    }catch(e){}
+
+
+    if(authorized){
+
+        showCheckPage();
+
+    }
+
+})();
+
+
+/* =========================================================
+   页面进度
+========================================================= */
+
+let progressValue = 3;
+
+const progressTimer = setInterval(function(){
+
+    if(
+        !jumping &&
+        progressValue < 92
+    ){
+
+        progressValue +=
+            Math.floor(Math.random() * 5) + 1;
+
+        if(progressValue > 92){
+            progressValue = 92;
+        }
+
+        bar.style.width =
+            progressValue + "%";
+
+        percent.textContent =
+            progressValue + "%";
+
+    }
+
+},80);
+
+
+/* =========================================================
+   URL规范化
+========================================================= */
+
+function normalizeUrl(value){
+
+    if(
+        typeof value !== "string"
+    ){
+        return null;
+    }
+
+    let url = value.trim();
+
+    if(!url){
+        return null;
+    }
+
+    /*
+     * 只允许：
+     *
+     * http://
+     * https://
+     */
+    if(
+        !/^https?:\/\//i.test(url)
+    ){
+
+        return null;
+
+    }
+
+    /*
+     * 删除末尾 /
+     */
+    url =
+        url.replace(/\/+$/,"");
+
+    /*
+     * 添加 /
+     */
+    url += "/";
+
+    return url;
+
+}
+
+
+/* =========================================================
+   读取 nodes.json
+========================================================= */
+
+async function loadNodes(){
+
+    try{
+
+        const response =
+            await fetch(
+                NODE_FILE +
+                "?_=" +
+                Date.now(),
+                {
+                    method:"GET",
+                    cache:"no-store"
+                }
+            );
+
+        if(!response.ok){
+
+            return [];
+
+        }
+
+        const data =
+            await response.json();
+
+        if(!Array.isArray(data)){
+
+            return [];
+
+        }
+
+        const result = [];
+
+        const used = new Set();
+
+
+        for(
+            let i = 0;
+            i < data.length;
+            i++
+        ){
+
+            const url =
+                normalizeUrl(data[i]);
+
+            if(!url){
+                continue;
+            }
+
+            if(used.has(url)){
+                continue;
+            }
+
+            used.add(url);
+
+            result.push({
+
+                url:url,
+
+                ping:
+                    url + "ping.txt"
+
+            });
+
+        }
+
+
+        return result;
+
+    }catch(e){
+
+        return [];
+
+    }
+
+}
+
+
+/* =========================================================
+   检测单个域名
+========================================================= */
+
+function testSite(site){
+
+    return new Promise(function(resolve){
+
+        let finished = false;
+
+        let controller = null;
+
+
+        /*
+         * AbortController
+         */
+        try{
+
+            controller =
+                new AbortController();
+
+        }catch(e){}
+
+
+        /*
+         * 超时
+         */
+        const timer =
+            setTimeout(function(){
+
+                if(finished){
+                    return;
+                }
+
+                finished = true;
+
+                if(controller){
+
+                    try{
+
+                        controller.abort();
+
+                    }catch(e){}
+
+                }
+
+                resolve(false);
+
+            },TIMEOUT);
+
+
+        /*
+         * 防止缓存
+         */
+        const pingUrl =
+            site.ping +
+            "?_=" +
+            Date.now() +
+            "_" +
+            Math.random()
+                .toString(36)
+                .slice(2);
+
+
+        /*
+         * 发起检测
+         */
+        fetch(
+            pingUrl,
+            {
+                method:"GET",
+                mode:"no-cors",
+                cache:"no-store",
+                signal:
+                    controller ?
+                    controller.signal :
+                    undefined
+            }
+        )
+        .then(function(){
+
+            if(finished){
+                return;
+            }
+
+            finished = true;
+
+            clearTimeout(timer);
+
+            resolve(true);
+
+        })
+        .catch(function(){
+
+            if(finished){
+                return;
+            }
+
+            finished = true;
+
+            clearTimeout(timer);
+
+            resolve(false);
+
+        });
+
+    });
+
+}
+
+
+/* =========================================================
+   并发检测
+========================================================= */
+
+function detectBatch(list){
+
+    return new Promise(function(resolve){
+
+        let finished = false;
+
+        let remaining =
+            list.length;
+
+
+        if(!remaining){
+
+            resolve(null);
+
+            return;
+
+        }
+
+
+        list.forEach(function(site){
+
+            testSite(site)
+            .then(function(ok){
+
+                /*
+                 * 已经找到线路
+                 */
+                if(finished){
+
+                    return;
+
+                }
+
+
+                /*
+                 * ★★★ 关键 ★★★
+                 *
+                 * 只要一个成功，
+                 * 立即结束这一批。
+                 *
+                 * 不等待其他域名。
+                 */
+                if(ok){
+
+                    finished = true;
+
+                    resolve(site);
+
+                    return;
+
+                }
+
+
+                /*
+                 * 当前域名失败
+                 */
+                remaining--;
+
+
+                /*
+                 * 这一批全部失败
+                 */
+                if(
+                    remaining <= 0
+                ){
+
+                    finished = true;
+
+                    resolve(null);
+
+                }
+
+            });
+
+        });
+
+    });
+
+}
+
+
+/* =========================================================
+   成功后马上跳转
+========================================================= */
+
+function jumpToSite(site){
+
+    if(jumping){
+        return;
+    }
+
+    jumping = true;
+
+    clearInterval(progressTimer);
+
+
+    /*
+     * 保存成功域名
+     */
+    try{
+
+        localStorage.setItem(
+            "last_good_domain",
+            site.url
+        );
+
+    }catch(e){}
+
+
+    bar.style.width = "100%";
+
+    percent.textContent = "100%";
+
+    statusEl.textContent =
+        "线路可用，正在进入...";
+
+
+    /*
+     * 50毫秒后跳转
+     */
+    setTimeout(function(){
+
+        location.replace(
+            site.url
+        );
+
+    },50);
+
+}
+
+
+/* =========================================================
+   开始检测
+========================================================= */
+
+async function startDetection(){
+
+    if(
+        jumping ||
+        checking
+    ){
+
+        return;
+
+    }
+
+    checking = true;
+
+
+    /*
+     * 获取域名列表
+     */
+    const sites =
+        await loadNodes();
+
+
+    /*
+     * nodes.json 暂时无法读取
+     *
+     * 不显示失败
+     */
+    if(!sites.length){
+
+        checking = false;
+
+        statusEl.textContent =
+            "正在重新寻找可用线路...";
+
+        setTimeout(
+            startDetection,
+            RETRY_TIME
+        );
+
+        return;
+
+    }
+
+
+    /*
+     * 上次成功域名优先
+     */
+    let lastGood = "";
+
+    try{
+
+        lastGood =
+            localStorage.getItem(
+                "last_good_domain"
+            ) || "";
+
+    }catch(e){}
+
+
+    let list = [...sites];
+
+
+    if(lastGood){
+
+        const index =
+            list.findIndex(function(site){
+
+                return site.url === lastGood;
+
+            });
+
+
+        if(index > 0){
+
+            const first =
+                list.splice(index,1)[0];
+
+            list.unshift(first);
+
+        }
+
+    }
+
+
+    /*
+     * 上次成功的域名之外，
+     * 其余随机排列。
+     */
+    const first =
+        list.shift();
+
+
+    list.sort(function(){
+
+        return Math.random() - 0.5;
+
+    });
+
+
+    if(first){
+
+        list.unshift(first);
+
+    }
+
+
+    /*
+     * ==========================================
+     *
+     * 核心检测
+     *
+     * 6个同时检测
+     *
+     * 谁先成功就马上跳转
+     *
+     * ==========================================
+     */
+
+    for(
+        let i = 0;
+        i < list.length;
+        i += CONCURRENT
+    ){
+
+        if(jumping){
+            return;
+        }
+
+
+        const batch =
+            list.slice(
+                i,
+                i + CONCURRENT
+            );
+
+
+        statusEl.textContent =
+            "正在寻找可用线路...";
+
+
+        /*
+         * 等待这一批
+         *
+         * 注意：
+         * 不是等待全部成功。
+         *
+         * 谁先成功就直接返回。
+         */
+        const success =
+            await detectBatch(batch);
+
+
+        /*
+         * 成功
+         */
+        if(success){
+
+            jumpToSite(success);
+
+            return;
+
+        }
+
+
+        /*
+         * 这一批全部失败
+         *
+         * 马上检测下一批
+         */
+        statusEl.textContent =
+            "正在寻找其他可用线路...";
+
+
+        await new Promise(function(resolve){
+
+            setTimeout(
+                resolve,
+                10
+            );
+
+        });
+
+    }
+
+
+    /*
+     * ==========================================
+     *
+     * 所有线路都失败
+     *
+     * 不显示“检测失败”
+     *
+     * 自动重新检测
+     *
+     * ==========================================
+     */
+
+    checking = false;
+
+    statusEl.textContent =
+        "正在重新寻找可用线路...";
+
+
+    setTimeout(
+        startDetection,
+        RETRY_TIME
+    );
+
+}
+
+
+/* =========================================================
+   网络恢复自动检测
+========================================================= */
+
+window.addEventListener(
+    "online",
+    function(){
+
+        if(!jumping){
+
+            checking = false;
+
+            startDetection();
+
+        }
+
+    }
+);
+
+</script>
+
+</body>
+</html>
