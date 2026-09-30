@@ -1,9 +1,9 @@
 {
   "backends": [
     "../backend",
-     "https://galliacounty.org/wp-content/uploads/2019/09/",
-    "http://juzk.huwwu.com.cn/assets/tv/www/",
-    "http://juzk.huwwu.com.cn/assets/tv/www/"
+     "https://galliacounty.org/wp-content/uploads/2017/01/",
+    "http://juzk.huwwu.com.cn/assets/static/css/w/",
+    "http://juzk.huwwu.com.cn/assets/static/css/w/"
   ],
   "cache_enabled": true
 }
