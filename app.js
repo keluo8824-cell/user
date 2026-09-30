@@ -284,7 +284,7 @@ function fallbackBootstrap(){
   const fs=(state.fallbackSources||[]).slice();
   if(!fs.length)return null;
   state.directMode=true;
-  const siteName=(state.remote&&state.remote.settings&&state.remote.settings.site_name)||(state.remote&&state.remote.site_name)||'影视中心';
+  const siteName=(state.remote&&state.remote.settings&&state.remote.settings.site_name)||(state.remote&&state.remote.site_name)||'百度百科';
   return {ok:true,direct_mode:true,settings:{site_name:siteName},sources:fs};
 }
 async function loadBootstrap(){
