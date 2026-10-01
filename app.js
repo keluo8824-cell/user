@@ -42,14 +42,23 @@ function injectMobileOptimize(){
   const st=document.createElement('style');
   st.id='mobileOptimizeStyle';
   st.textContent=`
-  .player-page{padding-top:48px;padding-bottom:65px;}
-  .player-page .back{position:fixed;top:0;left:0;z-index:99998;height:44px;}
+  .player-page{padding-top:6px;padding-bottom:65px;}
+  .player-page .video-title{margin:4px 0 6px!important;line-height:1.3;}
+  .player-page .back{position:relative;top:auto;left:auto;z-index:2;height:32px;margin:0 0 6px;padding:0 12px;font-size:14px;}
   .video-wrap{position:relative;width:100%;aspect-ratio:16/9;background:#000;z-index:1;}
   .video-wrap video{width:100%;height:100%;object-fit:contain;}
   .bottom-nav{z-index:99998!important;}
   .live-view{touch-action:pan-y;overscroll-behavior:none;}
   .live-item{height:auto;min-height:calc(100svh - 120px);position:relative;touch-action:pan-y;padding-top:60px;padding-bottom:60px;}
   .live-item video{width:100%;aspect-ratio:16/9;height:auto;object-fit:contain;background:#000;}
+  .player-tools{position:absolute;right:10px;bottom:10px;z-index:6;display:flex;gap:8px;}
+  .player-tools button{height:34px;padding:0 12px;border:0;border-radius:8px;background:rgba(0,0,0,.72);color:#fff;font-size:14px;cursor:pointer;backdrop-filter:blur(6px);}
+  .player-tools button:active{transform:scale(.96);}
+  .play-actions{display:flex;gap:10px;margin:12px 0;flex-wrap:wrap;}
+  .play-actions button{height:38px;padding:0 16px;border:0;border-radius:8px;background:#222;color:#fff;font-size:14px;cursor:pointer;}
+  .play-actions button:hover{background:#dc2626;}
+  .player-page .back{background:#dc2626!important;color:#fff;border-radius:8px;padding:0 12px;font-size:14px;font-weight:bold;}
+  @media(max-width:600px){.player-tools{right:8px;bottom:8px;gap:6px}.player-tools button{height:32px;padding:0 10px;font-size:13px}.play-actions button{flex:1;height:36px}}
   `;
   document.head.appendChild(st);
 }
@@ -284,7 +293,7 @@ function fallbackBootstrap(){
   const fs=(state.fallbackSources||[]).slice();
   if(!fs.length)return null;
   state.directMode=true;
-  const siteName=(state.remote&&state.remote.settings&&state.remote.settings.site_name)||(state.remote&&state.remote.site_name)||'百度百科';
+  const siteName=(state.remote&&state.remote.settings&&state.remote.settings.site_name)||(state.remote&&state.remote.site_name)||'影视中心';
   return {ok:true,direct_mode:true,settings:{site_name:siteName},sources:fs};
 }
 async function loadBootstrap(){
@@ -566,11 +575,87 @@ async function openPlay(id,episode=0){
   try{const j=await vod({ac:'detail',ids:id});const d=listOf(j)[0]||(j.data&&j.data[0]);if(!d)throw new Error('没有找到影片详情');state.detail=d;state.episode=episode;renderPlayer(d,episode)}catch(e){app.innerHTML='<div class="empty">'+esc(e.message||'影片加载失败')+'<br><button class="primary" id="backHome">返回首页</button></div>';document.getElementById('backHome').onclick=renderHome}
 }
 function historyBack(){destroyPlayer();if(history.state&&history.state.videoApp&&history.state.view==='play'&&history.length>1){history.back()}else{renderHome()}}
+function sharePage(){
+  const url=location.href;
+  const title=(state.detail&&pick(state.detail,['vod_name','name','title'],'精彩影片'))||'精彩影片';
+  if(navigator.share){
+    navigator.share({title:title,text:'推荐观看：'+title,url:url}).catch(()=>{});
+  }else{
+    try{
+      navigator.clipboard.writeText(url);
+      toast('分享链接已复制');
+    }catch(e){
+      prompt('复制分享链接：',url);
+    }
+  }
+}
+window.favoritePage=favoritePage;
+window.sharePage=sharePage;
+
+function favoritePage(){
+  const url=location.href;
+  const title=(state.detail&&pick(state.detail,['vod_name','name','title'],'影片'))||'影片';
+  try{
+    let arr=JSON.parse(localStorage.getItem('video_favorite')||'[]');
+    if(!arr.some(x=>x.url===url)){
+      arr.unshift({title:title,url:url,time:Date.now()});
+      localStorage.setItem('video_favorite',JSON.stringify(arr.slice(0,50)));
+      toast('已收藏本页');
+    }else{
+      toast('已经收藏');
+    }
+  }catch(e){toast('收藏失败');}
+}
+
 function renderPlayer(d,ep){
   const eps=parseEpisodes(d),current=eps[ep]||eps[0],name=pick(d,['vod_name','name','title'],'影片');
-  app.innerHTML='<div class="player-page"><button class="back" id="backHome">‹ 返回首页</button><h1 class="video-title">'+esc(name)+'</h1><div class="video-wrap"><video id="video" controls playsinline webkit-playsinline x5-video-player-type="h5" preload="auto"></video><button class="custom-fullscreen" id="fullScreenBtn">全屏</button><div class="trial-tip hidden" id="trialTip"></div></div>'+banner('player')+'<div class="episodes">'+eps.map((x,i)=>'<button class="episode '+(i===ep?'active':'')+'" data-episode="'+i+'">'+esc(x.name)+'</button>').join('')+'</div><div class="recommend-box" id="playRecommend"><h2>推荐作品</h2></div><div class="info"><div><b>类型：</b>'+esc(pick(d,['vod_class','type_name'],'未知'))+'</div><div><b>年份：</b>'+esc(pick(d,['vod_year','year'],'未知'))+'</div><div><b>主演：</b>'+esc(pick(d,['vod_actor','actor'],'未知'))+'</div><div><b>简介：</b>'+esc(String(pick(d,['vod_content','vod_blurb','content'],'暂无简介')).replace(/<[^>]*>/g,''))+'</div></div></div>';
-  document.getElementById('backHome').onclick=historyBack;document.querySelectorAll('[data-episode]').forEach(x=>x.onclick=()=>{destroyPlayer();renderPlayer(d,Number(x.dataset.episode))});
+  app.innerHTML='<div class="player-page"><button class="back" id="backHome">← 返回首页</button><h1 class="video-title">'+esc(name)+'</h1><div class="video-wrap"><video id="video" controls playsinline webkit-playsinline x5-video-player-type="h5" preload="auto"></video><div class="player-tools"><button class="custom-fullscreen" id="fullScreenBtn">⛶ 全屏</button><button class="custom-cast" id="castBtn">▣ 投屏</button></div><div class="trial-tip hidden" id="trialTip"></div></div><div class="play-actions"><button id="favBtn">☆ 收藏本页</button><button id="shareBtn">↗ 分享链接</button></div>'+banner('player')+'<div class="episodes">'+eps.map((x,i)=>'<button class="episode '+(i===ep?'active':'')+'" data-episode="'+i+'">'+esc(x.name)+'</button>').join('')+'</div><div class="recommend-box" id="playRecommend"><h2>推荐作品</h2></div><div class="info"><div><b>类型：</b>'+esc(pick(d,['vod_class','type_name'],'未知'))+'</div><div><b>年份：</b>'+esc(pick(d,['vod_year','year'],'未知'))+'</div><div><b>主演：</b>'+esc(pick(d,['vod_actor','actor'],'未知'))+'</div><div><b>简介：</b>'+esc(String(pick(d,['vod_content','vod_blurb','content'],'暂无简介')).replace(/<[^>]*>/g,''))+'</div></div></div>';
+  document.getElementById('backHome').onclick=historyBack;
+  const favBtn=document.getElementById('favBtn'); if(favBtn)favBtn.onclick=favoritePage;
+  const shareBtn=document.getElementById('shareBtn'); if(shareBtn)shareBtn.onclick=sharePage;
+  document.querySelectorAll('[data-episode]').forEach(x=>x.onclick=()=>{destroyPlayer();renderPlayer(d,Number(x.dataset.episode))});
   if(!current){toast('没有可播放的地址');return}startVideo(normalizeUrl(current.url));loadPlayRecommend();
+}
+
+async function requestVideoFullscreen(video){
+  try{
+    if(document.fullscreenElement||document.webkitFullscreenElement){
+      if(document.exitFullscreen)return await document.exitFullscreen();
+      if(document.webkitExitFullscreen)return document.webkitExitFullscreen();
+    }
+    if(video.requestFullscreen)return await video.requestFullscreen();
+    if(video.webkitEnterFullscreen)return video.webkitEnterFullscreen();
+    if(video.webkitRequestFullscreen)return video.webkitRequestFullscreen();
+    if(video.msRequestFullscreen)return video.msRequestFullscreen();
+    toast('当前浏览器不支持网页全屏');
+  }catch(e){toast('全屏失败，请使用播放器自带全屏按钮')}
+}
+
+async function requestVideoCast(video,url){
+  try{
+    // Safari / iPhone / iPad 的 AirPlay
+    if(window.WebKitPlaybackTargetAvailabilityEvent && typeof video.webkitShowPlaybackTargetPicker==='function'){
+      video.webkitShowPlaybackTargetPicker();
+      return;
+    }
+
+    // Chromium Remote Playback API（部分 Chrome / Android / TV 环境支持）
+    if(video.remote && typeof video.remote.prompt==='function'){
+      await video.remote.prompt();
+      return;
+    }
+
+    // Web Share 作为兼容兜底：把当前播放地址交给支持的投屏/播放器应用
+    if(navigator.share){
+      await navigator.share({title:document.title||'视频投屏',text:'视频播放地址',url:url});
+      return;
+    }
+
+    toast('当前浏览器没有可用的投屏接口，请使用系统投屏/浏览器投屏功能');
+  }catch(e){
+    if(e&&e.name==='AbortError')return;
+    toast('投屏启动失败，请确认电视和手机在同一网络');
+  }
 }
 
 // ===== 智能换源 V10 =====
@@ -630,7 +715,9 @@ function smartPlayFailed(url){
 function startVideo(url){
   const video=document.getElementById('video');state.trialStopped=false;
   const fs=document.getElementById('fullScreenBtn');
-  if(fs)fs.onclick=()=>{try{if(video.requestFullscreen)video.requestFullscreen();else if(video.webkitEnterFullscreen)video.webkitEnterFullscreen();else if(video.webkitRequestFullscreen)video.webkitRequestFullscreen();}catch(e){}};
+  const cast=document.getElementById('castBtn');
+  if(fs)fs.onclick=()=>requestVideoFullscreen(video);
+  if(cast)cast.onclick=()=>requestVideoCast(video,url);
 
   let failed=false;
   video.onerror=function(){
