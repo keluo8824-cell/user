@@ -223,6 +223,40 @@ async function api(action,data={}){
   });
 }
 function currentSourceObject(){return (state.sources||[]).find(x=>Number(x.id)===Number(state.sourceId))||null;}
+
+function sourceAdSkipRanges(){
+  const src=currentSourceObject();
+  const raw=src&&src.ad_skip_ranges;
+  let arr=raw;
+  if(typeof raw==='string'){try{arr=JSON.parse(raw)}catch(e){arr=[]}}
+  if(!Array.isArray(arr))return [];
+  return arr.map(function(r){return {start:Number(r&&r.start),end:Number(r&&r.end)}}).filter(function(r){return isFinite(r.start)&&isFinite(r.end)&&r.start>=0&&r.end>r.start}).sort(function(a,b){return a.start-b.start});
+}
+function setupAdSkip(video){
+  const ranges=sourceAdSkipRanges();
+  if(!ranges.length)return;
+  let seeking=false,lastKey='';
+  function skipIfNeeded(){
+    if(seeking||!video||!isFinite(video.currentTime))return;
+    const t=Number(video.currentTime);
+    for(let i=0;i<ranges.length;i++){
+      const r=ranges[i];
+      // 允许少量误差，避免 HLS timeupdate 跨过边界时漏跳；接近结束点时不重复触发。
+      if(t>=Math.max(0,r.start-0.15)&&t<r.end-0.12){
+        const key=r.start+'-'+r.end;
+        seeking=true;lastKey=key;
+        try{video.currentTime=r.end+0.05;}catch(e){}
+        setTimeout(function(){seeking=false},250);
+        toast('已自动跳过广告 '+Math.round(r.start)+'-'+Math.round(r.end)+' 秒');
+        return;
+      }
+    }
+  }
+  video.addEventListener('timeupdate',skipIfNeeded);
+  video.addEventListener('seeking',function(){setTimeout(skipIfNeeded,0)});
+  video.addEventListener('loadedmetadata',function(){setTimeout(skipIfNeeded,50)});
+}
+
 function directSourceForCurrent(){
   const cur=currentSourceObject();
   const curUrl=sourceApiUrl(cur);
@@ -753,6 +787,7 @@ function startVideo(url){
     state.hls.attachMedia(video);
   }else video.src=url;
   video.play().catch(()=>{});
+  setupAdSkip(video);
   setupTrial(video);
   setupPlaybackMemory(video);
 }
