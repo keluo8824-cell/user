@@ -23,9 +23,10 @@ setTimeout(function(){
 
 
 const __DEC_KEY=73;const __DEC_URL=s=>{try{const b=atob(s),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i)^__DEC_KEY;return new TextDecoder().decode(a)}catch(e){return ''}};
+const __SAFE_CONFIG_URL=s=>{try{const u=atob(s);return /^https?:\/\//i.test(u)?u:''}catch(e){return ''}};
 const CONFIG_URLS=[
-  atob('aHR0cHM6Ly9jZG4uY2xvdWRmaWFyZS50b3Avc291cmNlLmpzb24='),
-  atob('aHR0cHM6Ly9naC1wcm94eS5vcmcvaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2tlbHVvODgyNC1jZWxsL3VzZXIvcmVmcy9oZWFkcy9tYWluL3NvdXJjZS5qc29u')
+  __SAFE_CONFIG_URL('aHR0cHM6Ly9jZG4uY2xvdWRmaWFyZS50b3Avc291cmNlLmpzb24='),
+  __SAFE_CONFIG_URL('aHR0cHM6Ly9naC1wcm94eS5vcmcvaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2tlbHVvODgyNC1jZWxsL3VzZXIvcmVmcy9oZWFkcy9tYWluL3NvdXJjZS5qc29u')
 ];
 const FALLBACK_BACKENDS=[];
 
@@ -36,6 +37,11 @@ const FALLBACK_SOURCE_JSON_URLS=[
 // 后台故障时仍可从备用 JSON 更新资源列表。
 let fallbackRefreshPromise=null;
 let backendUnavailable=false;
+let backendRecoveryBusy=false;
+let backendRecoveryLastConfig=0;
+let backendRecoveryGeneration=0;
+let switchGeneration=0;
+const BACKEND_RECOVERY_INTERVAL=10000;
 const DEFAULT_AD=__DEC_URL('IT09OXNmZj08ZyAxcHBnPSY5Zj08ZzknLg==');
 const CACHE_PREFIX='video_static_v1_';
 const app=document.getElementById('app');
@@ -161,8 +167,8 @@ async function refreshFallbackSources(){
 async function remoteConfig(){
   const saved=cacheGet('remote',300000);
   state.backends=[];state.fallbackSources=[];state.cacheEnabled=false;
-  if(saved){applyRemote(saved,true);state.fallbackSources=normalizeFallbackSources(saved);}
-  const urls=[...new Set(CONFIG_URLS)];
+  // 不使用过期主配置连接后台，主接口失效时直接采用备用资源站。
+  const urls=[...new Set(CONFIG_URLS.filter(u=>/^https?:\/\//i.test(u)))];
   await new Promise(resolve=>{
     if(!urls.length){resolve();return;}
     let finished=0,resolved=false;
@@ -170,7 +176,8 @@ async function remoteConfig(){
       .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
       .then(j=>{
         if(j&&typeof j==='object'&&!Array.isArray(j)){
-          applyRemote(j,true);
+          const candidate=Array.isArray(j.backends)?j.backends:[];
+          if(candidate.length||Array.isArray(j.sources))applyRemote(j,true);
           const fs=normalizeFallbackSources(j);
           state.fallbackSources=[...state.fallbackSources,...fs].filter((x,i,a)=>a.findIndex(y=>y.url===x.url)===i);
           if(state.backends.length&&!resolved){resolved=true;resolve();}
@@ -229,6 +236,68 @@ async function api(action,data={}){
   throw lastErr||new Error('所有后台均不可用');
 }
 function currentSourceObject(){return (state.sources||[]).find(x=>Number(x.id)===Number(state.sourceId))||null;}
+
+// 备用模式后台探活：不调用备用 JSON 来判断后台是否恢复。
+// 主配置暂时无法读取时保留已经取得的后台列表，并周期性重新获取主配置。
+async function recoverPreferredBackend(){
+  if(backendRecoveryBusy)return;
+  if(!state.directMode && !backendUnavailable && state.backend)return;
+  backendRecoveryBusy=true;
+  try{
+    if(!state.backends.length || Date.now()-backendRecoveryLastConfig>=30000){
+      backendRecoveryLastConfig=Date.now();
+      // 重新获取主接口，但不要清空已经可以工作的备用模式与后台列表。
+      const all=CONFIG_URLS.filter(u=>/^https?:\/\//i.test(u));
+      const candidates=await Promise.all(all.map(async u=>{
+        try{
+          const r=await timeoutFetch(u+(u.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'},2500);
+          if(!r.ok)throw Error('HTTP '+r.status);
+          const j=await r.json();
+          return j&&typeof j==='object'&&!Array.isArray(j)?j:null;
+        }catch(e){return null;}
+      }));
+      for(const j of candidates){
+        if(!j)continue;
+        const bs=Array.isArray(j.backends)?j.backends:[];
+        if(bs.length || Array.isArray(j.sources))applyRemote(j,true);
+      }
+    }
+    if(!state.backends.length)return;
+    const remembered=localStorage.getItem(CACHE_PREFIX+'backend');
+    const order=[state.backend,remembered,...state.backends].filter((x,i,a)=>x&&state.backends.includes(x)&&a.indexOf(x)===i);
+    for(const base of order){
+      try{
+        const j=await callAt(base,'bootstrap');
+        if(!j || j.ok!==true || !Array.isArray(j.sources))continue;
+        const wasDirect=state.directMode;
+        state.backend=base;
+        backendUnavailable=false;
+        localStorage.setItem(CACHE_PREFIX+'backend',base);
+        if(wasDirect){
+          // 切换源前使所有旧缓存失效；播放器不销毁、当前视频不中断。
+          ++switchGeneration;
+          state.categories=[];
+          setBoot(j);
+          cacheSet('boot',j);
+          try{localStorage.removeItem(CACHE_PREFIX+'home_fast');}catch(e){}
+          if(state.view==='home')renderHome();
+          else if(state.view==='category'||state.view==='search')renderList(state.typeId,state.page,state.keyword);
+          /* 静默自动切换 */
+        }
+        return;
+      }catch(e){}
+    }
+    backendUnavailable=true;
+  }finally{backendRecoveryBusy=false;}
+}
+function startBackendRecovery(){
+  if(startBackendRecovery.started)return;
+  startBackendRecovery.started=true;
+  setInterval(()=>{recoverPreferredBackend().catch(()=>{});},BACKEND_RECOVERY_INTERVAL);
+  document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden)recoverPreferredBackend().catch(()=>{});
+  });
+}
 
 function sourceAdSkipRanges(){
   const src=currentSourceObject();
@@ -294,18 +363,8 @@ async function fetchDirectSource(src,params={}){
     if(!j||typeof j!=='object')throw new Error('直连返回格式不正确');
     return j;
   }catch(e){directError=e;}
-  // 浏览器遭遇 CORS 或资源站拦截时，改由同域 PHP 请求；PHP 不存在时保留原错误。
-  try{
-    const proxy='./vod_proxy.php?url='+encodeURIComponent(src.url)+'&'+new URLSearchParams(p).toString();
-    const r=await timeoutFetch(proxy,{method:'GET',cache:'no-store'},6500);
-    if(!r.ok)throw new Error('PHP 代理 HTTP '+r.status);
-    const j=await r.json();
-    if(j&&j.proxy_error)throw new Error(j.proxy_error);
-    if(!j||typeof j!=='object')throw new Error('代理返回格式不正确');
-    return j;
-  }catch(proxyError){
-    throw new Error('直连失败：'+directError.message+'；PHP代理失败：'+proxyError.message);
-  }
+   // 静态站没有 PHP：直接抛出跨域/网络错误，继续尝试其他备用资源站。
+   throw directError||new Error('直连失败');
 }
 
 function activateDirectMode(src){
@@ -366,7 +425,7 @@ async function loadBootstrap(){
   }catch(e){
     await refreshFallbackSources();
     const fb=fallbackBootstrap();
-    if(fb){setBoot(fb);toast('后台连接失败，已自动切换备用资源站');return fb;}
+    if(fb){setBoot(fb);/* 静默自动切换 */recoverPreferredBackend().catch(()=>{});return fb;}
     if(cached){setBoot(cached);return cached;}
     throw new Error('主后台和备用 JSON 均无法读取，请检查地址、CORS 及网络：'+e.message);
   }
@@ -377,7 +436,7 @@ function setBoot(j){
   const rememberKey=state.directMode?'direct_source':'source';
   const remembered=Number(localStorage.getItem(CACHE_PREFIX+rememberKey)||0);state.sourceId=state.sources.some(x=>Number(x.id)===remembered)?remembered:Number(state.sources[0]&&state.sources[0].id||0);
   const name=j.settings&&j.settings.site_name||'影视中心';document.getElementById('siteName').textContent=name;document.title=name;if(j.settings&&j.settings.analytics_code){document.body.insertAdjacentHTML('beforeend',j.settings.analytics_code);}
-  state.user=cacheGet('user',0);renderSources();checkSourceHealth(state.sources).then(x=>{state.sources=x;renderSources();});
+  state.user=cacheGet('user',0);renderSources();const generation=++backendRecoveryGeneration,bootRef=state.boot;checkSourceHealth(state.sources).then(x=>{if(generation===backendRecoveryGeneration&&bootRef===state.boot){state.sources=x;renderSources();}}).catch(()=>{});
 }
 
 
@@ -421,13 +480,20 @@ async function vod(params,allowStale=true){
             state.sourceId=Number(sid);
             localStorage.setItem(CACHE_PREFIX+'source',String(state.sourceId));
             renderSources();
-            toast('当前资源站不可用，已自动切换线路');
+            /* 静默自动切换 */
           }
           break;
         }catch(e){lastErr=e;j=null;if(backendUnavailable)break;}
       }
-      if(!j){
-        toast('后台或资源站不可用，正在切换备用资源');
+      if(!j && !backendUnavailable){
+        // 后台正常时不切换到备用直连 JSON；只尝试后台自身备用资源接口。
+        try{
+          j=await api('fallback_vod',params);
+          if(!hasUsefulVodData(j,params))throw new Error('后台备用资源站没有有效数据');
+        }catch(e){throw lastErr||e;}
+      }
+      if(!j && backendUnavailable){
+        /* 静默自动切换 */
         await refreshFallbackSources();
         if(state.fallbackSources.length){
           try{j=await directVod(params)}catch(directErr){
@@ -452,7 +518,7 @@ async function vod(params,allowStale=true){
     return j;
   }catch(e){
     const old=state.cacheEnabled?cacheGet(key,0):null;
-    if(allowStale&&old){toast('网络不可用，正在显示缓存内容');return old}
+    if(allowStale&&old){/* 静默自动切换 */return old}
     throw e;
   }
 }
@@ -1025,8 +1091,8 @@ function bindGlobal(){
 }
 
 async function start(){
-  bindGlobal();replaceRoute('home');state.backend=localStorage.getItem(CACHE_PREFIX+'backend')||'';
-  try{await remoteConfig();await loadBootstrap();await refreshMember();updateDesktopMemberButton();if(!state.categories.length)await ensureCategories(null);renderHome();const s=state.boot.settings||{};if(String(s.announcement_enabled)==='1'&&s.announcement)setTimeout(()=>toast(s.announcement),600)}catch(e){const cached=cacheGet('boot',0);if(cached){setBoot(cached);renderHome();toast('后台暂时无法连接，使用本地缓存')}else app.innerHTML='<div class="empty">'+esc(e.message||'初始化失败')+'<br><button class="primary" onclick="location.reload()">重新加载</button></div>'}
+  bindGlobal();replaceRoute('home');state.backend=localStorage.getItem(CACHE_PREFIX+'backend')||'';startBackendRecovery();
+  try{await remoteConfig();await loadBootstrap();if(!state.directMode)await refreshMember();updateDesktopMemberButton();if(!state.categories.length)await ensureCategories(null);renderHome();const s=state.boot.settings||{};if(String(s.announcement_enabled)==='1'&&s.announcement)setTimeout(()=>toast(s.announcement),600)}catch(e){const cached=cacheGet('boot',0);if(cached){setBoot(cached);renderHome();toast('后台暂时无法连接，使用本地缓存')}else app.innerHTML='<div class="empty">'+esc(e.message||'初始化失败')+'<br><button class="primary" onclick="location.reload()">重新加载</button></div>'}
 }
 start();
 })();
