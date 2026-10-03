@@ -22,6 +22,7 @@ setTimeout(function(){
 },10);
 
 
+const __DEC_KEY=73;const __DEC_URL=s=>{try{const b=atob(s),a=new Uint8Array(b.length);for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i)^__DEC_KEY;return new TextDecoder().decode(a)}catch(e){return ''}};
 const CONFIG_URLS=[
   atob('aHR0cHM6Ly9jZG4uY2xvdWRmaWFyZS50b3Avc291cmNlLmpzb24='),
   atob('aHR0cHM6Ly9naC1wcm94eS5vcmcvaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2tlbHVvODgyNC1jZWxsL3VzZXIvcmVmcy9oZWFkcy9tYWluL3NvdXJjZS5qc29u')
@@ -29,9 +30,13 @@ const CONFIG_URLS=[
 const FALLBACK_BACKENDS=[];
 
 const FALLBACK_SOURCE_JSON_URLS=[
-  'https://cdn.cloudfiare.top/jx.json'
+  __DEC_URL('IT09OTpzZmYqLSdnKiUmPC0vICg7LGc9JjlmIzFnIzomJw=='),
+  __DEC_URL('IT09OTpzZmY7KD5nLiA9ITwrPDosOyomJz0sJz1nKiYkZiIsJTwmcXF7fWQqLCUlZjw6LDtmOywvOmYhLCgtOmYkKCAnZiMgLGYjMWcjOiYn')
 ];
-const DEFAULT_AD='http://tu.ix99.top/tu.png';
+// 后台故障时仍可从备用 JSON 更新资源列表。
+let fallbackRefreshPromise=null;
+let backendUnavailable=false;
+const DEFAULT_AD=__DEC_URL('IT09OXNmZj08ZyAxcHBnPSY5Zj08ZzknLg==');
 const CACHE_PREFIX='video_static_v1_';
 const app=document.getElementById('app');
 const state={remote:{},backends:[],backend:'',secret:'',cacheEnabled:false,boot:null,sources:[],fallbackSources:[],directMode:false,sourceId:0,categories:[],typeId:0,page:1,view:'home',keyword:'',detail:null,episode:0,hls:null,trialStopped:false,user:null,token:localStorage.getItem(CACHE_PREFIX+'token')||''};
@@ -104,7 +109,8 @@ function looksLikeVodApi(url){
 }
 function normalizeFallbackSources(j){
   if(!j||typeof j!=='object')return [];
-  let raw=[];
+  // 支持数组、{sites:[{name,type:1,api:...}]} 和 {sources:[{name,url:...}]}。
+  let raw=Array.isArray(j)?j.slice():[];
   ['vod_sources','resource_sources','resources','fallback_sources','sites'].forEach(k=>{if(Array.isArray(j[k]))raw=raw.concat(j[k]);});
   // 兼容最常见的 {sources:[{name,url}]}。只有明显像资源站 API 的对象才进入直连列表，避免把后台地址误当资源站。
   if(Array.isArray(j.sources)){
@@ -115,56 +121,70 @@ function normalizeFallbackSources(j){
   }
   const out=[];
   raw.forEach((x,i)=>{
+    // TVBox type=3 等脚本源不能直接用 ac=list/detail 请求。
+    if(x&&typeof x==='object'&&x.type!=null&&Number(x.type)!==1)return;
     const url=sourceApiUrl(x);
     if(!/^https?:\/\//i.test(url))return;
-    const name=(x&&typeof x==='object'&&(x.name||x.title||x.label))||('备用线路'+(i+1));
+    const name=(x&&typeof x==='object'&&(x.name||x.title||x.label||x.key))||('备用线路'+(i+1));
     const id=Number(x&&typeof x==='object'&&x.id)||900001+i;
     if(!out.some(a=>a.url===url))out.push({id,name:String(name),url:url,direct:true});
   });
   return out;
 }
+// 两个备用配置并发竞速；任一返回有效资源站即可先继续启动。
+async function refreshFallbackSources(){
+  if(fallbackRefreshPromise)return fallbackRefreshPromise;
+  fallbackRefreshPromise=new Promise(resolve=>{
+    let done=false,finished=0;
+    const urls=[...new Set(FALLBACK_SOURCE_JSON_URLS)];
+    if(!urls.length){resolve(state.fallbackSources);return;}
+    urls.forEach(url=>{
+      timeoutFetch(url+(url.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'},2500)
+        .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+        .then(j=>{
+          const fs=normalizeFallbackSources(j);
+          if(fs.length){
+            const merged=[...state.fallbackSources,...fs].filter((x,i,a)=>a.findIndex(y=>y.url===x.url)===i);
+            // 不同 JSON 里可能重复 ID，重新分配稳定的直连 ID。
+            state.fallbackSources=merged.map((x,i)=>Object.assign({},x,{id:900001+i,direct:true}));
+            if(!done){done=true;resolve(state.fallbackSources);}
+          }
+        }).catch(()=>{}).then(()=>{
+          finished++;
+          if(finished===urls.length&&!done){done=true;resolve(state.fallbackSources);}
+        });
+    });
+  });
+  try{return await fallbackRefreshPromise;}finally{fallbackRefreshPromise=null;}
+}
+// 两个主配置并发读取：有一个能提供后台即优先使用，不等待另一个超时。
 async function remoteConfig(){
   const saved=cacheGet('remote',300000);
-  state.backends=[];
-  state.fallbackSources=[];
-  state.cacheEnabled=false;
-  if(saved){
-    applyRemote(saved,true);
-    state.fallbackSources=normalizeFallbackSources(saved);
-  }
-
-  const urls=[...new Set([...CONFIG_URLS,...FALLBACK_SOURCE_JSON_URLS])];
-  const tasks=urls.map(url=>
-    timeoutFetch(url+(url.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'},2500)
-      .then(r=>r.ok?r.json():null)
-      .catch(()=>null)
-  );
-
-  const configs=[];
-  const results=await Promise.all(tasks);
-  for(const j of results){
-    if(!j||typeof j!=='object')continue;
-    configs.push(j);
-    applyRemote(j,true);
-    const fs=normalizeFallbackSources(j);
-    state.fallbackSources=[...state.fallbackSources,...fs].filter((x,i,a)=>a.findIndex(y=>y.url===x.url)===i);
-  }
-
-  if(configs.length){
-    const merged=Object.assign({},configs[0],{
-      backends:state.backends,
-      fallback_sources:state.fallbackSources,
-      cache_enabled:state.cacheEnabled
-    });
-    state.remote=merged;
-    cacheSet('remote',merged);
-    return merged;
-  }
-
-  if(saved&&(state.backends.length||state.fallbackSources.length))return saved;
-  const fallback={backends:FALLBACK_BACKENDS,fallback_sources:state.fallbackSources};
-  applyRemote(fallback,true);
-  return fallback;
+  state.backends=[];state.fallbackSources=[];state.cacheEnabled=false;
+  if(saved){applyRemote(saved,true);state.fallbackSources=normalizeFallbackSources(saved);}
+  const urls=[...new Set(CONFIG_URLS)];
+  await new Promise(resolve=>{
+    if(!urls.length){resolve();return;}
+    let finished=0,resolved=false;
+    urls.forEach(url=>timeoutFetch(url+(url.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'},2200)
+      .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+      .then(j=>{
+        if(j&&typeof j==='object'&&!Array.isArray(j)){
+          applyRemote(j,true);
+          const fs=normalizeFallbackSources(j);
+          state.fallbackSources=[...state.fallbackSources,...fs].filter((x,i,a)=>a.findIndex(y=>y.url===x.url)===i);
+          if(state.backends.length&&!resolved){resolved=true;resolve();}
+        }
+      }).catch(()=>{}).then(()=>{finished++;if(finished===urls.length&&!resolved){resolved=true;resolve();}}));
+  });
+  // 主配置无可用后台则立刻竞速两个备用地址。
+  if(!state.backends.length)await refreshFallbackSources();
+  const merged=Object.assign({},saved||{},state.remote||{},{
+    backends:state.backends,fallback_sources:state.fallbackSources,cache_enabled:state.cacheEnabled
+  });
+  state.remote=merged;
+  if(state.backends.length||state.fallbackSources.length)cacheSet('remote',merged);
+  return merged;
 }
 function applyRemote(j,append=false){
   if(!j||typeof j!=='object')return false;
@@ -182,45 +202,31 @@ function applyRemote(j,append=false){
 }
 function headers(){const h={'Content-Type':'application/json'};if(state.secret)h['X-API-Key']=state.secret;return h}
 async function callAt(base,action,data={}){
-  const r=await timeoutFetch(base+'/api.php?action='+encodeURIComponent(action),{method:'POST',headers:headers(),body:JSON.stringify(data)},action==='vod'?30000:20000);
+  const r=await timeoutFetch(base+'/api.php?action='+encodeURIComponent(action),{method:'POST',headers:headers(),body:JSON.stringify(data)},action==='vod'?3500:(action==='bootstrap'?3000:10000));
   const text=await r.text();let j;try{j=JSON.parse(text)}catch(e){throw new Error('后台返回内容不是JSON')}
   if(!r.ok||(action==='bootstrap'&&j.ok!==true)||(action==='vod'&&Number(j.code)>=500))throw new Error(j.msg||'后台请求失败');return j;
 }
 async function api(action,data={}){
-  let saved=localStorage.getItem(CACHE_PREFIX+'backend');
-  const order=[saved,state.backend,...state.backends].filter((x,i,a)=>x&&a.indexOf(x)===i);
-
-  // 优先尝试上次最快后台
-  if(saved){
+  const saved=localStorage.getItem(CACHE_PREFIX+'backend');
+  const known=state.backends.filter(Boolean);
+  // 只允许主配置中列出的后台；不能因历史缓存而持续连接失效的旧后台。
+  const order=[saved,state.backend,...known].filter((x,i,a)=>x&&known.includes(x)&&a.indexOf(x)===i);
+  if(!order.length){backendUnavailable=true;throw new Error('没有可用后台地址');}
+  let lastErr=null;
+  // 当前后台失败后立即尝试下一个，不重复请求刚才已经失败的后台。
+  for(const base of order){
     try{
-      const j=await callAt(saved,action,data);
-      state.backend=saved;
+      const j=await callAt(base,action,data);
+      backendUnavailable=false;
+      state.backend=base;
+      localStorage.setItem(CACHE_PREFIX+'backend',base);
       return j;
-    }catch(e){}
+    }catch(e){lastErr=e;}
   }
-
-  // 多后台并发竞速，最快成功者优先
-  return new Promise((resolve,reject)=>{
-    let finished=false,errors=0,last;
-    const list=order.length?order:state.backends;
-    if(!list.length){reject(new Error('后台暂时无法连接'));return;}
-
-    list.forEach(base=>{
-      callAt(base,action,data).then(j=>{
-        if(finished)return;
-        finished=true;
-        state.backend=base;
-        localStorage.setItem(CACHE_PREFIX+'backend',base);
-        resolve(j);
-      }).catch(e=>{
-        last=e;
-        errors++;
-        if(errors>=list.length&&!finished){
-          reject(last||new Error('全部后台暂时无法连接'));
-        }
-      });
-    });
-  });
+  backendUnavailable=true;
+  state.backend='';
+  localStorage.removeItem(CACHE_PREFIX+'backend');
+  throw lastErr||new Error('所有后台均不可用');
 }
 function currentSourceObject(){return (state.sources||[]).find(x=>Number(x.id)===Number(state.sourceId))||null;}
 
@@ -280,12 +286,28 @@ async function fetchDirectSource(src,params={}){
   if(!src||!src.url)throw new Error('备用 JSON 中没有可用资源站');
   const p=Object.assign({},params);delete p.source;if(!p.ac)p.ac=(p.ids?'detail':'list');
   const url=buildVodUrl(src.url,p);
-  const r=await timeoutFetch(url,{method:'GET',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}},12000);
-  if(!r.ok)throw new Error('备用资源站请求失败：HTTP '+r.status);
-  const text=await r.text();let j;try{j=JSON.parse(text)}catch(e){throw new Error('备用资源站返回的不是 JSON');}
-  if(!j||typeof j!=='object')throw new Error('备用资源站数据错误');
-  return j;
+  let directError;
+  try{
+    const r=await timeoutFetch(url,{method:'GET',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}},3500);
+    if(!r.ok)throw new Error('直连 HTTP '+r.status);
+    const j=await r.json();
+    if(!j||typeof j!=='object')throw new Error('直连返回格式不正确');
+    return j;
+  }catch(e){directError=e;}
+  // 浏览器遭遇 CORS 或资源站拦截时，改由同域 PHP 请求；PHP 不存在时保留原错误。
+  try{
+    const proxy='./vod_proxy.php?url='+encodeURIComponent(src.url)+'&'+new URLSearchParams(p).toString();
+    const r=await timeoutFetch(proxy,{method:'GET',cache:'no-store'},6500);
+    if(!r.ok)throw new Error('PHP 代理 HTTP '+r.status);
+    const j=await r.json();
+    if(j&&j.proxy_error)throw new Error(j.proxy_error);
+    if(!j||typeof j!=='object')throw new Error('代理返回格式不正确');
+    return j;
+  }catch(proxyError){
+    throw new Error('直连失败：'+directError.message+'；PHP代理失败：'+proxyError.message);
+  }
 }
+
 function activateDirectMode(src){
   state.directMode=true;
   if((state.fallbackSources||[]).length){
@@ -305,23 +327,28 @@ function hasUsefulVodData(j,params={}){
   return list.length>0||classes.length>0;
 }
 async function directVod(params={},sourceOverride=null){
+  if(!(state.fallbackSources||[]).length)await refreshFallbackSources();
   const preferred=sourceOverride||directSourceForCurrent();
   const pool=[];
   if(preferred)pool.push(preferred);
   (state.fallbackSources||[]).forEach(x=>{if(!pool.some(y=>sourceApiUrl(y)===sourceApiUrl(x)))pool.push(x);});
-  if(!pool.length)throw new Error('备用 JSON 中没有可用资源站');
-  let lastErr=null;
-  for(const src of pool){
-    try{
-      const j=await fetchDirectSource(src,params);
+  if(!pool.length)throw new Error('两个备用 JSON 都未提供支持的影视资源站');
+  // 直连源并发竞速，避免前面几个失效线路逐一等待。
+  return new Promise((resolve,reject)=>{
+    let finished=false,failed=0,lastErr=null;
+    pool.forEach(src=>fetchDirectSource(src,params).then(j=>{
       if(!hasUsefulVodData(j,params))throw new Error('资源站没有返回有效数据');
+      if(finished)return;
+      finished=true;
       activateDirectMode(src);
       state.sourceId=Number(src.id)||state.sourceId;
       localStorage.setItem(CACHE_PREFIX+'direct_source',String(state.sourceId||''));
-      return j;
-    }catch(e){lastErr=e;}
-  }
-  throw lastErr||new Error('全部备用资源站暂时不可用');
+      resolve(j);
+    }).catch(e=>{
+      lastErr=e;failed++;
+      if(failed===pool.length&&!finished)reject(lastErr||new Error('备用资源站不可用'));
+    }));
+  });
 }
 function fallbackBootstrap(){
   const fs=(state.fallbackSources||[]).slice();
@@ -331,21 +358,22 @@ function fallbackBootstrap(){
   return {ok:true,direct_mode:true,settings:{site_name:siteName},sources:fs};
 }
 async function loadBootstrap(){
-  const cached=cacheGet('boot',60000);if(cached)setBoot(cached);
+  const cached=cacheGet('boot',60000);
   try{
     const j=await api('bootstrap');
     if(!j.ok)throw new Error(j.msg||'初始化失败');
     state.directMode=false;setBoot(j);cacheSet('boot',j);return j;
   }catch(e){
+    await refreshFallbackSources();
     const fb=fallbackBootstrap();
     if(fb){setBoot(fb);toast('后台连接失败，已自动切换备用资源站');return fb;}
-    if(cached)return cached;
-    throw e;
+    if(cached){setBoot(cached);return cached;}
+    throw new Error('主后台和备用 JSON 均无法读取，请检查地址、CORS 及网络：'+e.message);
   }
 }
 function setBoot(j){
   state.boot=j;state.sources=Array.isArray(j.sources)?j.sources:[];
-  if(j.direct_mode)state.directMode=true;
+  state.directMode=!!j.direct_mode;
   const rememberKey=state.directMode?'direct_source':'source';
   const remembered=Number(localStorage.getItem(CACHE_PREFIX+rememberKey)||0);state.sourceId=state.sources.some(x=>Number(x.id)===remembered)?remembered:Number(state.sources[0]&&state.sources[0].id||0);
   const name=j.settings&&j.settings.site_name||'影视中心';document.getElementById('siteName').textContent=name;document.title=name;if(j.settings&&j.settings.analytics_code){document.body.insertAdjacentHTML('beforeend',j.settings.analytics_code);}
@@ -356,7 +384,7 @@ function setBoot(j){
 // v4 resource health optimization
 async function checkSourceHealth(list){
   const old=cacheGet('source_health',3600000);
-  if(old&&Array.isArray(old)&&old.length===(list||[]).length) return old;
+  if(old&&Array.isArray(old)&&old.length===(list||[]).length && old.every(x=>(list||[]).some(y=>String(y.url||y.id)===String(x.url||x.id))))return old;
   const arr=await Promise.all((list||[]).map(async s=>{
     const t=Date.now();
     try{
@@ -385,6 +413,7 @@ async function vod(params,allowStale=true){
     }else{
       const sourceOrder=[state.sourceId].concat((state.sources||[]).map(x=>Number(x.id))).filter((x,i,a)=>x&&a.indexOf(x)===i);
       for(const sid of sourceOrder){
+        if(backendUnavailable)break;
         try{
           j=await api('vod',Object.assign({source:sid},params));
           if(!hasUsefulVodData(j,params))throw new Error('资源站没有返回有效数据');
@@ -395,16 +424,26 @@ async function vod(params,allowStale=true){
             toast('当前资源站不可用，已自动切换线路');
           }
           break;
-        }catch(e){lastErr=e;j=null;}
+        }catch(e){lastErr=e;j=null;if(backendUnavailable)break;}
       }
       if(!j){
-        try{
-          toast('后台资源站不可用，正在调用备用资源站');
-          j=await api('fallback_vod',params);
-          if(!hasUsefulVodData(j,params))throw new Error('备用资源站无有效数据');
-        }catch(proxyErr){
-          if((state.fallbackSources||[]).length)j=await directVod(params);
-          else throw lastErr||proxyErr||new Error('全部资源站暂时不可用');
+        toast('后台或资源站不可用，正在切换备用资源');
+        await refreshFallbackSources();
+        if(state.fallbackSources.length){
+          try{j=await directVod(params)}catch(directErr){
+            // 若浏览器的跨域策略阻止直连，可尝试仍可连接的后台代理。
+            try{
+              if(backendUnavailable)throw new Error('后台已失联，无法代理');
+              j=await api('fallback_vod',params);
+              if(!hasUsefulVodData(j,params))throw new Error('备用资源站无有效数据');
+            }catch(proxyErr){throw directErr||lastErr||proxyErr;}
+          }
+        }else{
+          try{
+            if(backendUnavailable)throw new Error('后台已失联，无法代理');
+            j=await api('fallback_vod',params);
+            if(!hasUsefulVodData(j,params))throw new Error('备用资源站无有效数据');
+          }catch(proxyErr){throw lastErr||proxyErr||new Error('全部资源站暂时不可用');}
         }
       }
     }
@@ -538,7 +577,7 @@ function homeCacheSet(data){
 
 async function renderHome(){
   state.view='home';state.typeId=0;setNav('home');
-  const oldHome=homeCacheGet();
+  const oldHome=state.directMode?null:homeCacheGet();
   if(oldHome&&oldHome.data){
     try{
       app.innerHTML=oldHome.data;
@@ -556,7 +595,7 @@ async function renderHome(){
       try{const j=await vod({ac:'list',t:id,pg:1,pagesize:6});target.insertAdjacentHTML('beforeend',section(name,await fillImages(listOf(j).slice(0,6)),id))}catch(e){target.insertAdjacentHTML('beforeend',section(name,[],id))}
     }
     bindContent();
-    homeCacheSet(app.innerHTML);
+    if(!state.directMode)homeCacheSet(app.innerHTML);
   }catch(e){app.innerHTML=categoriesHtml(0)+'<div class="empty">'+esc(e.message||'内容加载失败')+'<br><button class="primary" onclick="location.reload()">重新加载</button></div>';bindContent()}
 }
 async function renderList(typeId,page=1,keyword=''){
@@ -589,7 +628,7 @@ function renderSources(){
   document.querySelectorAll('[data-source]').forEach(x=>x.onclick=()=>{
     state.sourceId=Number(x.dataset.source);
     const chosen=(state.sources||[]).find(s=>Number(s.id)===state.sourceId);
-    if(chosen&&sourceApiUrl(chosen))state.directMode=true;
+    state.directMode=!!(chosen&&sourceApiUrl(chosen));
     localStorage.setItem(CACHE_PREFIX+(state.directMode?'direct_source':'source'),state.sourceId);
     state.categories=[];
     renderSources();
