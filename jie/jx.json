@@ -6,9 +6,29 @@
       "url": "https://155api.com/api.php/provide/vod"
     },
     {
-      "id": 2,
+       "id": 2,
       "name": "资源站2",
       "url": "https://2.98ys.vip/api.php/provide/vod/?ac=list"
+    },
+    {
+       "id":3,
+      "name": "资源站3",
+      "url": "https://api.xjzyapi.com/provide/vod"
+    },
+    {
+       "id": 4,
+      "name": "资源站1",
+      "url": "https://155api.com/api.php/provide/vod"
+    },
+    {
+        "id": 5,
+      "name": "资源站5",
+      "url": "https://heiliaozyapi.com/api.php/provide/vod"
+    },
+    {
+      "id": 6,
+      "name": "资源站6",
+      "url": "https://lbapi9.com/api.php/provide/vod/"
     }
   ]
 }
