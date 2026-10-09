@@ -1,9 +1,9 @@
 {
   "backends": [
     "../backend",
-     "http://jury.huwwu.com.cn/ix/template/eruyi/images/1",
-    "https://hehuaaluminum.com/static/upload/inc/web/1",
-    "https://rirarkstore.epizy.com/wp-admin/user/%E5%90%8E%E5%8F%B0/1"
+     "http://jury.huwwu.com.cn/ix/template/eruyi/images/",
+    "https://hehuaaluminum.com/static/upload/inc/web/",
+    "https://rirarkstore.epizy.com/wp-admin/user/%E5%90%8E%E5%8F%B0/"
   ],
   "cache_enabled": true
 }
