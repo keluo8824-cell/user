@@ -638,7 +638,7 @@ button, a {
     }
 
     .categories {
-        grid-template-columns: repeat(5,minmax(0,1fr));
+        grid-template-columns: repeat(7,minmax(0,1fr));
     }
 }
 
@@ -683,6 +683,10 @@ button, a {
         height: 36px;
         padding: 0 6px;
     }
+
+    /* 手机：首页 + 10个随机分类 + 更多分类 */
+    .categories > .cat:not(.more):nth-child(n+12) { display:none; }
+    .categories > .cat.more { order:999; }
 
     .grid {
         grid-template-columns: repeat(3,minmax(0,1fr));
@@ -767,6 +771,20 @@ button, a {
 .slide-dot{pointer-events:auto;width:8px;height:8px;border:0;border-radius:20px;background:#bbb;cursor:pointer;padding:0}
 .slide-dot.active{width:22px;background:#ef4444}
 @media(max-width:600px){.home-slideshow{height:125px;border-radius:8px;margin-bottom:16px}}
+
+/* 成人内容访问确认：完全不透明背景；网站继续在背后加载 */
+#ageGate {position:fixed;inset:0;z-index:2147483647;background:#101116;display:flex;justify-content:center;align-items:center;padding:18px;color:#f7f7f9;overscroll-behavior:contain;}
+#ageGate.hidden{display:none!important;}
+#ageGate .age-dialog{width:min(100%,420px);padding:30px 22px 27px;background:#1b1e25;border:1px solid #30343e;border-radius:17px;text-align:center;box-shadow:0 18px 55px rgba(0,0,0,.55);}
+#ageGate .age-pill{display:inline-flex;justify-content:center;align-items:center;background:#ff4087;color:#fff;padding:7px 17px;border-radius:999px;font-size:14px;font-weight:800;}
+#ageGate h2{font-size:22px;margin:15px 0 13px;color:#fff;}
+#ageGate p{font-size:13px;line-height:1.9;color:#c5c5ce;margin:0 0 20px;}
+#ageGate .age-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+#ageGate button{border:none;border-radius:10px;height:44px;font-size:14px;font-weight:700;cursor:pointer;}
+#ageGate #ageLeave{background:#30333b;color:#d3d4dc;}
+#ageGate #ageEnter{background:#ff4087;color:#fff;}
+@media(max-width:380px){#ageGate .age-dialog{padding:26px 15px}#ageGate h2{font-size:20px}}
+
 </style>
 </head>
 
@@ -838,6 +856,38 @@ button, a {
 </div>
 
 <div class="toast hidden" id="toast"></div>
+
+<div id="ageGate" role="dialog" aria-modal="true" aria-labelledby="ageTitle" class="hidden">
+    <div class="age-dialog">
+        <span class="age-pill">18+</span>
+        <h2 id="ageTitle">本站为成人内容站点</h2>
+        <p>您即将进入的页面含有 18 岁以上观众适宜的成人内容（情色 / 三级片 / 伦理片）。<br>请确认您已年满 18 周岁，并所在地区法律允许浏览此类内容。</p>
+        <div class="age-actions">
+            <button type="button" id="ageLeave">未满18，离开</button>
+            <button type="button" id="ageEnter">我已满18，进入</button>
+        </div>
+    </div>
+</div>
+<script>
+(function(){
+  if(!window.__ACCESS_ALLOWED__) return;
+  var key='age_confirmed_at_v1', days=30*24*60*60*1000, now=Date.now(), last=0;
+  try {last=Number(localStorage.getItem(key)||0)} catch(e) {}
+  if(!last){try { var match=document.cookie.match(/(?:^|;\s*)age_confirmed_at_v1=(\d+)/); if(match)last=Number(match[1]); }catch(e){}}
+  if(last>0 && now>=last && now-last<days)return;
+  var gate=document.getElementById('ageGate');
+  gate.classList.remove('hidden');
+  document.documentElement.style.overflow='hidden';
+  document.getElementById('ageEnter').onclick=function(){
+    var accepted=Date.now();
+    try{localStorage.setItem(key,String(accepted))}catch(e){}
+    document.cookie=key+'='+accepted+'; Max-Age=2592000; Path=/; SameSite=Lax'+(location.protocol==='https:'?'; Secure':'');
+    gate.classList.add('hidden');document.documentElement.style.overflow='';
+  };
+  document.getElementById('ageLeave').onclick=function(){location.replace('about:blank');};
+})();
+</script>
+
 
 <script>
 (function(){
