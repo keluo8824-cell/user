@@ -1,7 +1,7 @@
 {
   "backends": [
     "../backend",
-    "https://ysp.xingyig.cn/config/tv/backend/",
+    "https://ysp.xingyig.cn/config/tv/tv/",
     "https://rirarkstore.epizy.com/wp-admin/user/%E5%90%8E%E5%8F%B0/"
   ],
   "cache_enabled": true
