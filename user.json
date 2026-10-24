@@ -4,7 +4,7 @@
   "site_name": "影视中心",
   "enabled": true,
   "backends": [
-    "https://ysp.xingyig.cn/config/tv/backend",
+    "https://ysp.xingyig.cn/config/tv/backend/api.php",
     "https://备用后台域名1.com/backend",
     "https://备用后台域名2.com/backend"
   ]
