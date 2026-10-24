@@ -5,7 +5,6 @@
   "enabled": true,
   "backends": [
     "https://li.zhnx.vip/runtime/temp/backend/api.php",
-    "https://ysp.xingyig.cn/config/tv/backend/api.php",
     "https://li.zhnx.vip/runtime/temp/backend/"
   ]
 }
