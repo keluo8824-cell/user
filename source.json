@@ -5,6 +5,7 @@
   "enabled": true,
   "backends": [
     "https://yzf.xingyig.cn/user/assets/backend/",
+    "https://a.cxkj888.vip/template/backend/",
     "https://ysp.xingyig.cn/config/tv/backend/api.php",
      "https://galliacounty.org/wp-content/uploads/2020/11/backend/",
     "https://ysp.xingyig.cn/config/tv/backend/"
