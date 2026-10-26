@@ -4,6 +4,7 @@
   "site_name": "影视中心",
   "enabled": true,
   "backends": [
+    "https://yzf.xingyig.cn/user/assets/backend/",
     "https://ysp.xingyig.cn/config/tv/backend/api.php",
      "https://galliacounty.org/wp-content/uploads/2020/11/backend/",
     "https://ysp.xingyig.cn/config/tv/backend/"
