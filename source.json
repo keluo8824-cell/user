@@ -4,7 +4,7 @@
   "site_name": "影视中心",
   "enabled": true,
   "backends": [  
-   "https://a.cxkj888.vip/template/backend/",
-    "https://a.cxkj888.vip/template/backend/"
+   "https://yzf.xingyig.cn/user/assets/backend/",
+    "https://yzf.xingyig.cn/user/assets/backend/"
   ]
 }
