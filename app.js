@@ -79,7 +79,7 @@ function injectMobileOptimize(){
   .video-wrap video{width:100%;height:100%;object-fit:contain;background:#000;}
   .player-tools{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0;}
   .player-tools button{min-width:0;height:42px;border:1px solid #76518f;border-radius:22px;background:linear-gradient(135deg,#261b3c,#171327);color:#f7eaff;font-size:13px;}
-  .play-source-card,.player-info{margin:12px 0;padding:14px;border:1px solid rgba(188,92,230,.3);border-radius:18px;background:linear-gradient(135deg,rgba(54,31,78,.94),rgba(23,19,43,.96));box-shadow:0 8px 24px rgba(0,0,0,.18);}
+  .rich-reader{display:block!important;min-height:200px;overflow-wrap:anywhere}.rich-reader #resourceContent{line-height:1.9;font-size:16px;white-space:normal}.rich-reader #resourceContent img{max-width:100%;height:auto;display:block;margin:12px auto;border-radius:8px}.rich-reader #resourceContent p{margin:10px 0}.play-source-card,.player-info{margin:12px 0;padding:14px;border:1px solid rgba(188,92,230,.3);border-radius:18px;background:linear-gradient(135deg,rgba(54,31,78,.94),rgba(23,19,43,.96));box-shadow:0 8px 24px rgba(0,0,0,.18);}
   .source-heading{font-weight:700;font-size:17px;margin:0 0 10px;color:#f8eaff;}
   .episodes{display:flex;gap:8px;overflow-x:auto;padding:2px 0 6px;scrollbar-width:none;}
   .episodes::-webkit-scrollbar{display:none}
@@ -485,7 +485,7 @@ async function directVod(params={},sourceOverride=null){
   const preferred=sourceOverride||directSourceForCurrent();
   const pool=[];
   if(preferred)pool.push(preferred);
-  if(!locked)(state.fallbackSources||[]).forEach(x=>{if(!pool.some(y=>sourceApiUrl(y)===sourceApiUrl(x)))pool.push(x);});
+  // 不再轮询其他资源站；网络或资源异常只显示错误
   if(!pool.length)throw new Error('没有可用资源站');
   let lastErr=null;
   for(const src of pool){
@@ -493,7 +493,7 @@ async function directVod(params={},sourceOverride=null){
     try{
       const j=await fetchDirectSource(src,params);
       if(!hasUsefulVodData(j,params))throw new Error('当前资源站未返回有效数据');
-      if(!locked && Number(src.id)!==Number(state.sourceId))activateDirectMode(src);
+      // 用户手动点击换源才可改变当前资源站
       return j;
     }catch(e){lastErr=e;}
   }
@@ -507,6 +507,18 @@ function fallbackBootstrap(){
   return {ok:true,direct_mode:true,settings:{site_name:siteName},sources:fs};
 }
 async function loadBootstrap(){
+  const selected=localStorage.getItem(MANUAL_SOURCE_KEY);
+  if(selected){
+    try{
+      const m=JSON.parse(selected);
+      if(m.direct){
+        await refreshFallbackSources();
+        const fs=state.fallbackSources.find(x=>sourceApiUrl(x)===m.url);
+        if(!fs)throw new Error('手动选择的资源站不在当前配置中，请检查资源站配置');
+        const fb=fallbackBootstrap();setBoot(fb);return fb;
+      }
+    }catch(e){if(e instanceof SyntaxError){}else throw e;}
+  }
   const cached=cacheGet('boot',60000);
   try{
     const j=await api('bootstrap');
@@ -526,7 +538,7 @@ function setBoot(j){
   state.boot=j;state.sources=Array.isArray(j.sources)?j.sources:[];
   state.directMode=!!j.direct_mode;
   const rememberKey=state.directMode?'direct_source':'source';
-  const locked=localStorage.getItem(MANUAL_SOURCE_KEY);let remembered=Number(localStorage.getItem(CACHE_PREFIX+rememberKey)||0);if(locked){try{const m=JSON.parse(locked);const exact=state.sources.find(x=>sourceApiUrl(x)&&sourceApiUrl(x)===m.url)||state.sources.find(x=>Number(x.id)===Number(m.id)&&String(x.name||'')===m.name);if(exact)remembered=Number(exact.id);else if(m.direct){const backup=state.fallbackSources.find(x=>sourceApiUrl(x)===m.url);if(backup){state.directMode=true;state.sources=state.fallbackSources.slice();remembered=Number(backup.id);}}}catch(e){}}state.sourceId=state.sources.some(x=>Number(x.id)===remembered)?remembered:Number(state.sources[0]&&state.sources[0].id||0);
+  const locked=localStorage.getItem(MANUAL_SOURCE_KEY);let remembered=Number(localStorage.getItem(CACHE_PREFIX+rememberKey)||0);if(locked){try{const m=JSON.parse(locked);const exact=state.sources.find(x=>sourceApiUrl(x)&&sourceApiUrl(x)===m.url)||state.sources.find(x=>Number(x.id)===Number(m.id)&&String(x.name||'')===m.name);if(exact)remembered=Number(exact.id);else if(m.direct){const backup=state.fallbackSources.find(x=>sourceApiUrl(x)===m.url);if(backup){state.directMode=true;state.sources=state.fallbackSources.slice();remembered=Number(backup.id);}}}catch(e){}}state.sourceId=state.sources.some(x=>Number(x.id)===remembered)?remembered:(locked?0:Number(state.sources[0]&&state.sources[0].id||0));
   const name=j.settings&&j.settings.site_name||'影视中心';document.getElementById('siteName').textContent=name;document.title=name;if(j.settings&&j.settings.analytics_code){document.body.insertAdjacentHTML('beforeend',j.settings.analytics_code);}
   state.user=cacheGet('user',0);renderSources();const generation=++backendRecoveryGeneration,bootRef=state.boot;checkSourceHealth(state.sources).then(x=>{if(generation===backendRecoveryGeneration&&bootRef===state.boot){state.sources=x;renderSources();}}).catch(()=>{});
 }
@@ -556,13 +568,13 @@ async function checkSourceHealth(list){
 }
 function vodCacheKey(p){let raw;try{raw=btoa(unescape(encodeURIComponent(JSON.stringify(p))))}catch(e){raw=JSON.stringify(p)}return 'vod_'+state.sourceId+'_'+raw.replace(/=+$/,'').slice(-80)}
 async function vod(params,allowStale=true){
-  const key=vodCacheKey(params),fresh=state.cacheEnabled?cacheGet(key,10*60*1000):null;if(fresh)return fresh;
+  const key=vodCacheKey(params),fresh=state.cacheEnabled?cacheGet(key,10*60*1000):null;if(!state.sourceId)throw new Error('手动选择的资源站不在当前线路列表中，请点击换源重新选择');if(fresh)return fresh;
   try{
     let j,lastErr=null;
     if(state.directMode){
       j=await directVod(params);
     }else{
-      const isManual=!!localStorage.getItem(MANUAL_SOURCE_KEY);
+      const isManual=true; // 所有资源站必须由用户手动选择
       const sourceOrder=(isManual?[state.sourceId]:[state.sourceId].concat((state.sources||[]).map(x=>Number(x.id)))).filter((x,i,a)=>x&&a.indexOf(x)===i);
       for(const sid of sourceOrder){
         if(backendUnavailable)break;
@@ -889,6 +901,8 @@ function renderSources(){
     state.sourceId=Number(x.dataset.source);
     const chosen=(state.sources||[]).find(s=>Number(s.id)===state.sourceId);
     state.directMode=!!(chosen&&sourceApiUrl(chosen));
+    localStorage.setItem(MANUAL_SOURCE_KEY,JSON.stringify({id:state.sourceId,name:String(chosen&&chosen.name||''),url:sourceApiUrl(chosen)||'',direct:state.directMode}));
+    ++pageGeneration; // 取消旧线路在途的页面请求
     localStorage.setItem(CACHE_PREFIX+(state.directMode?'direct_source':'source'),state.sourceId);
     state.categories=[];
     renderSources();
@@ -898,14 +912,60 @@ function renderSources(){
 }
 
 
-function parseEpisodes(detail){
-  const raw=String(pick(detail,['vod_play_url','play_url','url'],''));if(!raw)return[];
-  const lines=raw.split('###').map(x=>x.trim()).filter(Boolean);let best=lines.find(x=>/m3u8|mp4/i.test(x))||lines[0]||'';
-  return best.split('#').map((x,i)=>{const p=x.split('$');return p.length>1?{name:p.shift()||('第'+(i+1)+'集'),url:p.join('$')}:{name:'第'+(i+1)+'集',url:x}}).filter(x=>/^https?:|^\/\//i.test(x.url));
+function parsePlayGroups(detail){
+  const raw=String(pick(detail,['vod_play_url','play_url','url'],''));
+  if(!raw)return [];
+  const names=String(pick(detail,['vod_play_from','play_from'],'')).split('$$$');
+  return raw.split('$$$').map((part,idx)=>({
+    name:names[idx]||('线路'+(idx+1)),
+    episodes:part.split('#').map((item,i)=>{
+      const pos=item.indexOf('$');
+      const name=pos<0?'第'+(i+1)+'章':item.slice(0,pos)||'第'+(i+1)+'章';
+      const url=(pos<0?item:item.slice(pos+1)).trim();
+      return {name,url};
+    }).filter(x=>x.url && !/^(javascript|data|vbscript):/i.test(x.url))
+  })).filter(x=>x.episodes.length);
+}
+function parseEpisodes(detail){const groups=parsePlayGroups(detail);return groups.length?groups[0].episodes:[];}
+function isMediaUrl(url){return /\.(mp4|m3u8|m4v|webm|mov|mpd|flv|ts)(?:[?#]|$)/i.test(url)||/\/(?:play|video|stream)\b/i.test(url);}
+function safeContentHtml(input){
+  const root=document.createElement('div');root.innerHTML=String(input||'');
+  const allowed=new Set(['P','BR','DIV','SPAN','B','STRONG','I','EM','U','H2','H3','H4','UL','OL','LI','BLOCKQUOTE','IMG']);
+  function clean(node){
+    if(node.nodeType===3)return document.createTextNode(node.textContent);
+    if(node.nodeType!==1)return document.createDocumentFragment();
+    const tag=node.tagName;
+    if(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','FORM','SVG','MATH'].includes(tag))return document.createDocumentFragment();
+    const el=allowed.has(tag)?document.createElement(tag.toLowerCase()):document.createDocumentFragment();
+    if(tag==='IMG' && el.nodeType===1){
+      const url=node.getAttribute('src')||node.getAttribute('data-src')||'';
+      if(/^(https?:\/\/|\/\/|\/[^/])/i.test(url)){
+        el.setAttribute('src',normalizeUrl(url));el.setAttribute('loading','lazy');el.setAttribute('referrerpolicy','no-referrer');el.setAttribute('alt',node.getAttribute('alt')||'配图');
+      }else return document.createDocumentFragment();
+    }
+    Array.from(node.childNodes).forEach(child=>el.appendChild(clean(child)));
+    return el;
+  }
+  const output=document.createElement('div');Array.from(root.childNodes).forEach(x=>output.appendChild(clean(x)));
+  // 纯文本正文保留换行；不允许任何原站脚本或事件属性。
+  if(!/<[a-z][\s\S]*?>/i.test(String(input||'')))output.style.whiteSpace='pre-wrap';
+  return output;
+}
+function richText(detail){return String(pick(detail,['vod_content','vod_text','vod_article','vod_body','article_content','book_content','chapter_content','text','content','vod_blurb'],''));}
+function bindRichContent(detail,groups,ep){
+  const box=document.getElementById('resourceContent');if(!box)return;
+  const raw=richText(detail);
+  if(raw){box.appendChild(safeContentHtml(raw));}
+  if(!raw && !groups.length)box.textContent='本站资源站没有提供正文或章节内容';
+  document.querySelectorAll('[data-chapter]').forEach(btn=>btn.onclick=()=>{
+    const url=btn.dataset.chapter;
+    if(/^https?:\/\//i.test(url)){window.open(url,'_blank','noopener,noreferrer');}
+    else toast('资源站未提供可直接阅读的章节正文');
+  });
 }
 async function openPlay(id,episode=0){
   destroyPlayer();const requestGeneration=++pageGeneration;state.view='play';setNav('home');app.innerHTML='<div class="player-page"><button class="back" id="backHome">‹ 返回</button><div class="loading">正在读取影片…</div></div>';document.getElementById('backHome').onclick=historyBack;
-  try{const j=await vod({ac:'detail',ids:id});if(requestGeneration!==pageGeneration||state.view!=='play')return;const d=listOf(j)[0]||(j.data&&j.data[0]);if(!d)throw new Error('没有找到影片详情');state.detail=d;state.episode=episode;renderPlayer(d,episode)}catch(e){if(requestGeneration!==pageGeneration)return;app.innerHTML='<div class="empty">'+esc(e.message||'影片加载失败')+'<br><button class="primary" id="backHome">返回首页</button></div>';document.getElementById('backHome').onclick=()=>{pushRoute('home');renderHome()}}
+  try{const j=await vod({ac:'detail',ids:id});if(requestGeneration!==pageGeneration||state.view!=='play')return;const d=listOf(j)[0]||(j.data&&j.data[0]);if(!d)throw new Error('没有找到影片详情');state.detail=d;state.episode=episode;state.playGroupIndex=0;renderPlayer(d,episode)}catch(e){if(requestGeneration!==pageGeneration)return;app.innerHTML='<div class="empty">'+esc(e.message||'影片加载失败')+'<br><button class="primary" id="backHome">返回首页</button></div>';document.getElementById('backHome').onclick=()=>{pushRoute('home');renderHome()}}
 }
 function historyBack(){leavePlayback();app.innerHTML='';pushRoute('home');renderHome()}
 function sharePage(){
@@ -942,14 +1002,15 @@ function favoritePage(){
 
 function renderPlayer(d,ep){
   stopHomeSlides();
-  const eps=parseEpisodes(d),current=eps[ep]||eps[0],name=pick(d,['vod_name','name','title'],'影片');
+  const groups=parsePlayGroups(d); const groupIndex=Math.min(Math.max(0,Number(state.playGroupIndex)||0),Math.max(0,groups.length-1));const eps=groups[groupIndex]?groups[groupIndex].episodes:[],current=eps[ep]||eps[0],name=pick(d,['vod_name','name','title'],'作品');
+  const isReading=/小说|图文|文章|漫画|资讯|电子书|阅读/i.test(String(pick(d,['type_name','vod_class','type','category'],'')))||(!eps.some(x=>isMediaUrl(x.url))&&!!richText(d));
   const poster=image(d)||'';
   const intro=String(pick(d,['vod_content','vod_blurb','content'],'暂无简介')).replace(/<[^>]*>/g,'');
   app.innerHTML='<div class="player-page neon-player">'+
     '<div class="player-head"><button class="back" id="backHome">⌂ <span>返回首页</span></button><h1 class="video-title">'+esc(name)+'</h1><div class="player-head-actions"><button id="favBtn" aria-label="收藏">☆</button><button id="shareBtn" aria-label="分享">↗</button></div></div>'+
-    '<div class="video-wrap"><video id="video" controls playsinline webkit-playsinline x5-video-player-type="h5" preload="auto" poster="'+esc(poster)+'"></video><div class="trial-tip hidden" id="trialTip"></div></div>'+
-    '<div class="player-tools"><button id="rewindBtn">↶ 后退10秒</button><button id="forwardBtn">↷ 快进10秒</button><button class="custom-cast" id="castBtn">▣ 投屏</button><button class="custom-fullscreen" id="fullScreenBtn">⛶ 全屏</button></div>'+
-    '<section class="play-source-card"><div class="source-heading">▶ 播放选集 / 清晰度</div><div class="episodes">'+eps.map((x,i)=>'<button class="episode '+(i===ep?'active':'')+'" data-episode="'+i+'">'+esc(x.name)+'</button>').join('')+'</div></section>'+
+    (isReading?'':'<div class="video-wrap"><video id="video" controls playsinline webkit-playsinline x5-video-player-type="h5" preload="auto" poster="'+esc(poster)+'"></video><div class="trial-tip hidden" id="trialTip"></div></div>')+
+    (isReading?'':'<div class="player-tools"><button id="rewindBtn">↶ 后退10秒</button><button id="forwardBtn">↷ 快进10秒</button><button class="custom-cast" id="castBtn">▣ 投屏</button><button class="custom-fullscreen" id="fullScreenBtn">⛶ 全屏</button></div>')+
+    '<section class="play-source-card"><div class="source-heading">'+(isReading?'📖 阅读章节':'▶ 手动选择播放线路 / 选集')+'</div><div class="episodes">'+groups.map((g,i)=>'<button class="episode '+(i===groupIndex?'active':'')+'" data-play-group="'+i+'">'+esc(g.name)+'</button>').join('')+'</div><div class="episodes">'+eps.map((x,i)=>'<button class="episode '+(i===ep?'active':'')+'" '+(isReading?'data-chapter="'+esc(x.url)+'"':'data-episode="'+i+'"')+'>'+esc(x.name)+'</button>').join('')+'</div></section>'+(isReading?'<section class="player-info rich-reader"><h2>正文 / 图文详情</h2><div id="resourceContent"></div></section>':'')+
     '<section class="info player-info"><div class="info-poster">'+(poster?'<img src="'+esc(poster)+'" alt="'+esc(name)+'">':'')+'</div><div class="info-content"><div class="info-title-row"><h2 class="info-title">'+esc(name)+'</h2><span class="info-score">★ '+esc(pick(d,['vod_score','score'],'高清'))+'</span></div><div><b>类型：</b>'+esc(pick(d,['vod_class','type_name'],'未知'))+'</div><div><b>年份：</b>'+esc(pick(d,['vod_year','year'],'未知'))+'</div><div><b>主演：</b>'+esc(pick(d,['vod_actor','actor'],'未知'))+'</div><div class="player-intro"><b>简介：</b><span id="playerIntroText">'+esc(intro)+'</span></div><button class="intro-toggle" id="introToggle">展开简介⌄</button></div></section>'+
     '<div class="play-actions"><button id="favActionBtn">☆ 收藏</button><button id="shareActionBtn">↗ 分享</button></div>'+
     '<div class="recommend-box" id="playRecommend"><h2>推荐作品</h2></div></div>';
@@ -960,8 +1021,11 @@ function renderPlayer(d,ep){
   const shareAction=document.getElementById('shareActionBtn');if(shareAction)shareAction.onclick=sharePage;
   const introToggle=document.getElementById('introToggle');
   if(introToggle)introToggle.onclick=()=>{const box=document.getElementById('playerIntroText');box.classList.toggle('expanded');introToggle.textContent=box.classList.contains('expanded')?'收起简介⌃':'展开简介⌄';};
-  document.querySelectorAll('[data-episode]').forEach(x=>x.onclick=()=>{destroyPlayer();renderPlayer(d,Number(x.dataset.episode))});
-  if(!current){toast('没有可播放的地址');return}
+  document.querySelectorAll('[data-play-group]').forEach(x=>x.onclick=()=>{state.playGroupIndex=Number(x.dataset.playGroup);destroyPlayer();renderPlayer(d,0)});
+  document.querySelectorAll('[data-episode]').forEach(x=>x.onclick=()=>{destroyPlayer();state.episode=Number(x.dataset.episode);renderPlayer(d,state.episode)});
+  if(isReading){bindRichContent(d,groups,ep);loadPlayRecommend();return;}
+  if(!current){toast('该资源没有视频播放地址，可尝试在详情中阅读内容');loadPlayRecommend();return;}
+  if(!/^https?:\/\//i.test(normalizeUrl(current.url))){toast('当前线路不是可直接播放的视频地址，请手动选择其他线路');loadPlayRecommend();return;}
   startVideo(normalizeUrl(current.url));loadPlayRecommend();
 }
 
@@ -1087,7 +1151,7 @@ function startVideo(url){
     if(failed)return;
     failed=true;
     smartPlayFailed(url);
-    toast('当前线路失败，正在尝试备用线路');
+    toast('当前播放地址失败，请手动选择线路或换源');
   };
 
   if(window.Hls&&Hls.isSupported()&&/\.m3u8(?:$|\?)/i.test(url)){
@@ -1158,8 +1222,7 @@ function setupPlaybackMemory(video){
     video.addEventListener('ended',function(){
       const next=document.querySelector('[data-episode="'+(Number(ep)+1)+'"]');
       if(next){
-        toast('即将播放下一集');
-        setTimeout(function(){next.click()},3000);
+        toast('本集播放结束，请手动点击下一集');
       }
     });
   }catch(e){}
