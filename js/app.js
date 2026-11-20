@@ -32,6 +32,7 @@ const FALLBACK_BACKENDS=[];
 
 // 资源站配置：本地一个 + 远程两个，去除原来重复的远程地址。
 const FALLBACK_SOURCE_JSON_URLS=[
+  './jx.json',
   'https://cdn.cloudfiare.top/jx.json',
   'https://gh-proxy.org/https://raw.githubusercontent.com/keluo8824-cell/user/refs/heads/main/jie/jx.json'
 ];
@@ -189,33 +190,38 @@ function normalizeFallbackSources(j){
 // 两个备用配置并发竞速；任一返回有效资源站即可先继续启动。
 async function refreshFallbackSources(){
   if(fallbackRefreshPromise)return fallbackRefreshPromise;
-  fallbackRefreshPromise=new Promise(resolve=>{
-    let done=false,finished=0;
+  fallbackRefreshPromise=(async()=>{
+    // 按“本地 jx.json -> 远程一 -> 远程二”合并去重，保留后两者供用户手动选择。
+    // 任何一个配置加载失败，都不能让其他有效配置一并失效。
     const urls=[...new Set(FALLBACK_SOURCE_JSON_URLS)];
-    if(!urls.length){resolve(state.fallbackSources);return;}
-    urls.forEach(url=>{
-      timeoutFetch(url+(url.includes('?')?'&':'?')+'t='+Date.now(),{cache:'no-store'},2500)
-        .then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
-        .then(j=>{
-          const fs=normalizeFallbackSources(j);
-          if(fs.length){
-            const merged=[...state.fallbackSources,...fs].filter((x,i,a)=>a.findIndex(y=>y.url===x.url)===i);
-            // 不同 JSON 里可能重复 ID，重新分配稳定的直连 ID。
-            state.fallbackSources=merged.map((x,i)=>Object.assign({},x,{id:900001+i,direct:true}));
-            if(!done){done=true;resolve(state.fallbackSources);}
-          }
-        }).catch(()=>{}).then(()=>{
-          finished++;
-          if(finished===urls.length&&!done){done=true;resolve(state.fallbackSources);}
-        });
-    });
-  });
+    const results=await Promise.all(urls.map(async url=>{
+      try{
+        const target=url+(url.includes('?')?'&':'?')+'t='+Date.now();
+        const r=await timeoutFetch(target,{cache:'no-store'},url.startsWith('./')?2500:4000);
+        if(!r.ok)throw new Error('HTTP '+r.status);
+        return normalizeFallbackSources(await r.json());
+      }catch(e){return [];}
+    }));
+    const combined=[];
+    for(const group of results)for(const src of group){
+      if(!combined.some(existing=>existing.url===src.url))combined.push(src);
+    }
+    if(combined.length){
+      state.fallbackSources=combined.map((x,i)=>Object.assign({},x,{id:900001+i,direct:true}));
+      cacheSet('fallback_sources',state.fallbackSources);
+    }else if(!state.fallbackSources.length){
+      const cached=cacheGet('fallback_sources',0);
+      if(Array.isArray(cached))state.fallbackSources=cached;
+    }
+    return state.fallbackSources;
+  })();
   try{return await fallbackRefreshPromise;}finally{fallbackRefreshPromise=null;}
 }
+
 // 两个主配置并发读取：有一个能提供后台即优先使用，不等待另一个超时。
 async function remoteConfig(){
   const saved=cacheGet('remote',300000);
-  state.backends=[];state.fallbackSources=[];state.cacheEnabled=false;
+  state.backends=[];state.cacheEnabled=false;
   // 不使用过期主配置连接后台，主接口失效时直接采用备用资源站。
   const urls=[...new Set(CONFIG_URLS.filter(u=>/^https?:\/\//i.test(u)))];
   await new Promise(resolve=>{
@@ -309,7 +315,7 @@ async function preflightBackendSource(base,boot){
 }
 async function recoverPreferredBackend(){
   if(backendRecoveryBusy)return;
-  if(localStorage.getItem(MANUAL_SOURCE_KEY))return;
+  if(localStorage.getItem(MANUAL_SOURCE_KEY)&&!(lookupHealth(currentSourceObject())&&lookupHealth(currentSourceObject()).ok===false))return;
   if(!state.directMode && !backendUnavailable && state.backend)return;
   backendRecoveryBusy=true;
   try{
@@ -435,7 +441,8 @@ function directSourceForCurrent(){
     if(m)return m;
   }
   const remembered=Number(localStorage.getItem(CACHE_PREFIX+'direct_source')||0);
-  return (state.fallbackSources||[]).find(x=>Number(x.id)===remembered)||(state.fallbackSources||[])[0]||null;
+  const picked=(state.fallbackSources||[]).find(x=>Number(x.id)===remembered);
+  return picked||(state.fallbackSources||[])[0]||null;
 }
 function buildVodUrl(base,params={}){
   const u=new URL(base,location.href);
@@ -446,19 +453,23 @@ function buildVodUrl(base,params={}){
   return u.href;
 }
 async function fetchDirectSource(src,params={}){
-  if(!src||!src.url)throw new Error('备用 JSON 中没有可用资源站');
+  if(!src||!src.url)throw new Error('当前资源站没有配置接口地址');
   const p=Object.assign({},params);delete p.source;if(!p.ac)p.ac=(p.ids?'detail':'list');
   const url=buildVodUrl(src.url,p);
-  let directError;
   try{
-    const r=await timeoutFetch(url,{method:'GET',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}},3500);
-    if(!r.ok)throw new Error('直连 HTTP '+r.status);
-    const j=await r.json();
-    if(!j||typeof j!=='object')throw new Error('直连返回格式不正确');
+    const r=await timeoutFetch(url,{method:'GET',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}},8000);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const raw=await r.text();let j;
+    try{j=JSON.parse(raw);}catch(e){throw new Error('接口未返回有效 JSON');}
+    if(!j||typeof j!=='object')throw new Error('接口返回格式不正确');
     return j;
-  }catch(e){directError=e;}
-   // 静态站没有 PHP：直接抛出跨域/网络错误，继续尝试其他备用资源站。
-   throw directError||new Error('直连失败');
+  }catch(e){
+    const msg=(e&&e.message)||'网络请求失败';
+    if(e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(msg)){
+      throw new Error('无法从浏览器读取此资源站，可能是资源站未开放 CORS 跨域或网络不通；请手动换源');
+    }
+    throw new Error('当前资源站读取失败：'+msg+'（请手动换源）');
+  }
 }
 
 function activateDirectMode(src){
@@ -508,30 +519,38 @@ function fallbackBootstrap(){
 }
 async function loadBootstrap(){
   const selected=localStorage.getItem(MANUAL_SOURCE_KEY);
+  // 只有手动指定了直连资源站时，才跳过后台。
   if(selected){
     try{
       const m=JSON.parse(selected);
       if(m.direct){
         await refreshFallbackSources();
         const fs=state.fallbackSources.find(x=>sourceApiUrl(x)===m.url);
-        if(!fs)throw new Error('手动选择的资源站不在当前配置中，请检查资源站配置');
+        if(!fs)throw new Error('手动选择的备用资源站已不在配置中，请重新换源');
         const fb=fallbackBootstrap();setBoot(fb);return fb;
       }
-    }catch(e){if(e instanceof SyntaxError){}else throw e;}
+    }catch(e){if(!(e instanceof SyntaxError))throw e;}
   }
-  const cached=cacheGet('boot',60000);
+  // 正常情况首先尝试主后台的 bootstrap。
   try{
+    if(!state.backends.length)throw new Error('主后台未配置或不可达');
     const j=await api('bootstrap');
-    if(!j.ok)throw new Error(j.msg||'初始化失败');
-    state.directMode=false;setBoot(j);cacheSet('boot',j);return j;
+    if(!j.ok||!Array.isArray(j.sources)||!j.sources.length)throw new Error('主后台没有可用资源站');
+    state.directMode=false;setBoot(j);cacheSet('boot',j);
+    return j;
   }catch(e){
-    const locked=localStorage.getItem(MANUAL_SOURCE_KEY);
-    if(locked){try{const m=JSON.parse(locked);if(!m.direct)throw new Error('手动选定的资源站后台连接失败，不会自动切换其他资源站');}catch(x){if(x&&x.message&&x.message.indexOf('手动选定')===0)throw x;}}
+    backendUnavailable=true;
     await refreshFallbackSources();
     const fb=fallbackBootstrap();
-    if(fb){setBoot(fb);/* 静默自动切换 */recoverPreferredBackend().catch(()=>{});return fb;}
-    if(cached){setBoot(cached);return cached;}
-    throw new Error('主后台和备用 JSON 均无法读取，请检查地址、CORS 及网络：'+e.message);
+    if(fb){
+      // 原来手动锁定的是后台源；后台不可用时允许降级到备用配置。
+      try{const m=JSON.parse(selected||'null');if(m&&!m.direct)localStorage.removeItem(MANUAL_SOURCE_KEY);}catch(e){}
+      setBoot(fb);toast('后台无法连接，已启用备用资源站');return fb;
+    }
+    const cached=cacheGet('boot',0);
+    // 不把主后台的旧列表当作仍可访问的直连 API。
+    if(cached&&cached.direct_mode){setBoot(cached);return cached;}
+    throw new Error('后台与备用资源站配置均无法读取：'+e.message);
   }
 }
 function setBoot(j){
@@ -540,7 +559,7 @@ function setBoot(j){
   const rememberKey=state.directMode?'direct_source':'source';
   const locked=localStorage.getItem(MANUAL_SOURCE_KEY);let remembered=Number(localStorage.getItem(CACHE_PREFIX+rememberKey)||0);if(locked){try{const m=JSON.parse(locked);const exact=state.sources.find(x=>sourceApiUrl(x)&&sourceApiUrl(x)===m.url)||state.sources.find(x=>Number(x.id)===Number(m.id)&&String(x.name||'')===m.name);if(exact)remembered=Number(exact.id);else if(m.direct){const backup=state.fallbackSources.find(x=>sourceApiUrl(x)===m.url);if(backup){state.directMode=true;state.sources=state.fallbackSources.slice();remembered=Number(backup.id);}}}catch(e){}}state.sourceId=state.sources.some(x=>Number(x.id)===remembered)?remembered:(locked?0:Number(state.sources[0]&&state.sources[0].id||0));
   const name=j.settings&&j.settings.site_name||'影视中心';document.getElementById('siteName').textContent=name;document.title=name;if(j.settings&&j.settings.analytics_code){document.body.insertAdjacentHTML('beforeend',j.settings.analytics_code);}
-  state.user=cacheGet('user',0);renderSources();const generation=++backendRecoveryGeneration,bootRef=state.boot;checkSourceHealth(state.sources).then(x=>{if(generation===backendRecoveryGeneration&&bootRef===state.boot){state.sources=x;renderSources();}}).catch(()=>{});
+  state.user=cacheGet('user',0);renderSources(); // 检测由启动流程在后台异步执行。
 }
 
 
@@ -562,70 +581,193 @@ async function checkSourceHealth(list){
       return Object.assign({},s,{ok:false,speed:9999});
     }
   }));
-  arr.sort((a,b)=>Number(b.ok)-Number(a.ok)||a.speed-b.speed);
+  // 健康检测只显示状态，不改变用户配置的资源站顺序。
   cacheSet('source_health',arr);
   return arr;
 }
-function vodCacheKey(p){let raw;try{raw=btoa(unescape(encodeURIComponent(JSON.stringify(p))))}catch(e){raw=JSON.stringify(p)}return 'vod_'+state.sourceId+'_'+raw.replace(/=+$/,'').slice(-80)}
-async function vod(params,allowStale=true){
-  const key=vodCacheKey(params),fresh=state.cacheEnabled?cacheGet(key,10*60*1000):null;if(!state.sourceId)throw new Error('手动选择的资源站不在当前线路列表中，请点击换源重新选择');if(fresh)return fresh;
+
+// ===== 每日按当前浏览器实际网络检测（不等同服务端或地域判断） =====
+const DAILY_HEALTH_PREFIX=CACHE_PREFIX+'daily_play_health_v1_';
+const DAILY_CHECK_TIMEOUT=6500;
+let dailyCheckRun=null;
+let failoverRunning=false;
+const healthSession=new Map();
+function dayStamp(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function healthId(src){return (src&&src.direct?'direct:':'backend:')+String(sourceApiUrl(src)||(state.backend+'#'+String(src&&src.id||'')));}
+function healthStoreKey(){return DAILY_HEALTH_PREFIX+dayStamp();}
+function getDailyHealth(){try{return JSON.parse(localStorage.getItem(healthStoreKey())||'{}')||{}}catch(e){return {}}}
+function writeDailyHealth(obj){try{localStorage.setItem(healthStoreKey(),JSON.stringify(obj));const prefix=DAILY_HEALTH_PREFIX;for(let i=localStorage.length-1;i>=0;i--){const k=localStorage.key(i);if(k&&k.indexOf(prefix)===0&&k!==healthStoreKey())localStorage.removeItem(k);}}catch(e){}}
+function lookupHealth(src){if(!src)return null;const key=healthId(src);return healthSession.get(key)||getDailyHealth()[key]||null;}
+function recordHealth(src,ok,reason){if(!src)return;const key=healthId(src);const result={ok:!!ok,reason:String(reason||''),time:Date.now()};healthSession.set(key,result);const all=getDailyHealth();all[key]=result;writeDailyHealth(all);renderSources();}
+function verifiedSources(sources){return (sources||[]).filter(x=>{const h=lookupHealth(x);return h&&h.ok;});}
+function firstPlayableEpisode(item){const groups=parsePlayGroups(item);for(const g of groups){for(const ep of g.episodes){if(/^https?:\/\//i.test(normalizeUrl(ep.url)) && isMediaUrl(ep.url))return ep.url;}}return '';}
+function probeVideoMetadata(url,timeoutMs=DAILY_CHECK_TIMEOUT){
+  return new Promise(resolve=>{
+    const v=document.createElement('video');v.preload='metadata';v.muted=true;v.playsInline=true;
+    let done=false,timer=null,hls=null;
+    function end(ok){if(done)return;done=true;clearTimeout(timer);try{v.pause();v.removeAttribute('src');v.load();}catch(e){}if(hls)try{hls.destroy();}catch(e){}resolve(!!ok);}
+    timer=setTimeout(()=>end(false),timeoutMs);
+    v.addEventListener('loadedmetadata',()=>end(true),{once:true});
+    v.addEventListener('canplay',()=>end(true),{once:true});
+    v.addEventListener('error',()=>end(false),{once:true});
+    try{
+      if(/\.m3u8(?:[?#]|$)/i.test(url)&&!v.canPlayType('application/vnd.apple.mpegurl')){
+        if(window.Hls&&Hls.isSupported()){
+          hls=new Hls({enableWorker:false,autoStartLoad:true,maxBufferLength:2});
+          hls.on(Hls.Events.ERROR,(_,data)=>{if(data&&data.fatal)end(false)});
+          hls.loadSource(url);hls.attachMedia(v);
+        }else end(false);
+      }else v.src=url;
+    }catch(e){end(false)}
+  });
+}
+async function sourceRequest(src,params){
+  const url=sourceApiUrl(src);
+  if(src.direct||url)return fetchDirectSource(Object.assign({},src,{url:url}),params);
+  if(!state.backend)throw new Error('后台未连接');
+  return callAt(state.backend,'vod',Object.assign({source:src.id},params));
+}
+async function verifyOneSource(src){
+  const already=lookupHealth(src);if(already)return already.ok;
   try{
-    let j,lastErr=null;
-    if(state.directMode){
-      j=await directVod(params);
-    }else{
-      const isManual=true; // 所有资源站必须由用户手动选择
-      const sourceOrder=(isManual?[state.sourceId]:[state.sourceId].concat((state.sources||[]).map(x=>Number(x.id)))).filter((x,i,a)=>x&&a.indexOf(x)===i);
-      for(const sid of sourceOrder){
-        if(backendUnavailable)break;
-        try{
-          j=await api('vod',Object.assign({source:sid},params));
-          if(!hasUsefulVodData(j,params))throw new Error('资源站没有返回有效数据');
-          if(Number(sid)!==Number(state.sourceId)){
-            state.sourceId=Number(sid);
-            localStorage.setItem(CACHE_PREFIX+'source',String(state.sourceId));
-            renderSources();
-            /* 静默自动切换 */
-          }
-          break;
-        }catch(e){lastErr=e;j=null;if(backendUnavailable)break;}
+    const top=await sourceRequest(src,{ac:'list',pg:1,pagesize:12});
+    const items=listOf(top);if(!items.length)throw new Error('资源列表为空');
+    // 只对确实有视频链接的资源站抽样；图文小说可读取但不误标为视频可播放。
+    let tested=0,readingValid=false,reason='没有可验证的视频播放地址';
+    for(const item of items.slice(0,6)){
+      if(tested>=3)break;
+      let detail=item;
+      if(!firstPlayableEpisode(detail)&&pick(item,['vod_id','id'],'')){
+        try{const d=await sourceRequest(src,{ac:'detail',ids:pick(item,['vod_id','id'])});detail=listOf(d)[0]||detail;}catch(e){continue;}
       }
-      if(!j && !backendUnavailable && !isManual){
-        // 后台正常时不切换到备用直连 JSON；只尝试后台自身备用资源接口。
-        try{
-          j=await api('fallback_vod',params);
-          if(!hasUsefulVodData(j,params))throw new Error('后台备用资源站没有有效数据');
-        }catch(e){throw lastErr||e;}
-      }
-      if(!j && backendUnavailable && !isManual){
-        /* 静默自动切换 */
-        await refreshFallbackSources();
-        if(state.fallbackSources.length){
-          try{j=await directVod(params)}catch(directErr){
-            // 若浏览器的跨域策略阻止直连，可尝试仍可连接的后台代理。
-            try{
-              if(backendUnavailable)throw new Error('后台已失联，无法代理');
-              j=await api('fallback_vod',params);
-              if(!hasUsefulVodData(j,params))throw new Error('备用资源站无有效数据');
-            }catch(proxyErr){throw directErr||lastErr||proxyErr;}
-          }
-        }else{
-          try{
-            if(backendUnavailable)throw new Error('后台已失联，无法代理');
-            j=await api('fallback_vod',params);
-            if(!hasUsefulVodData(j,params))throw new Error('备用资源站无有效数据');
-          }catch(proxyErr){throw lastErr||proxyErr||new Error('全部资源站暂时不可用');}
-        }
+      const url=firstPlayableEpisode(detail);if(!url){if(/小说|图文|漫画|文章|阅读|资讯/.test(String(pick(detail,['type_name','vod_class','type','category'],'')))&&richText(detail).trim().length>40)readingValid=true;continue;}
+      tested++;
+      if(await probeVideoMetadata(normalizeUrl(url))){recordHealth(src,true,'视频抽样加载成功');return true;}
+      reason='抽样视频无法加载';
+    }
+    if(!tested&&readingValid){recordHealth(src,true,'图文正文可读取（不代表视频可播放）');return true;}
+    throw new Error(reason);
+  }catch(e){recordHealth(src,false,e&&e.message||'读取失败');return false;}
+}
+async function runDailySourceCheck(){
+  if(dailyCheckRun)return dailyCheckRun;
+  dailyCheckRun=(async()=>{
+    const initial=state.sources.slice();
+    // 后台/本地备用共用检测逻辑；后台正常时也允许提前检验备用候选源。
+    await refreshFallbackSources().catch(()=>{});
+    const all=[...initial,...state.fallbackSources].filter((s,i,a)=>a.findIndex(x=>healthId(x)===healthId(s))===i);
+    let index=0;
+    await Promise.all(Array.from({length:Math.min(3,all.length)},async()=>{
+      while(index<all.length){const src=all[index++];await verifyOneSource(src);}
+    }));
+    if(state.sources.length&&!verifiedSources(state.sources).length){
+      const spare=verifiedSources(state.fallbackSources)[0];
+      if(spare){activateDirectMode(spare);state.sourceId=spare.id;state.categories=[];if(state.view==='home')renderHome();}
+    }else if(state.sources.length){
+      const cur=currentSourceObject();
+      if(cur&&lookupHealth(cur)&&lookupHealth(cur).ok===false){
+        const alt=verifiedSources(state.sources)[0];
+        if(alt){state.sourceId=alt.id;state.categories=[];renderSources();if(state.view==='home')renderHome();}
       }
     }
-    if(!hasUsefulVodData(j,params))throw new Error('当前资源站数据无效');
-    if(state.cacheEnabled)cacheSet(key,j);
-    return j;
-  }catch(e){
-    const old=state.cacheEnabled?cacheGet(key,0):null;
-    if(allowStale&&old){/* 静默自动切换 */return old}
-    throw e;
+    renderSources();
+  })().finally(()=>{dailyCheckRun=null;});
+  return dailyCheckRun;
+}
+function showHealthySources(){
+  const all=state.sources||[];
+  // 只展示当天检测过且通过的源，未检测/失败一律隐藏。
+  return all.filter(s=>{const h=lookupHealth(s);return h&&h.ok;});
+}
+function simplifiedTitle(t){return String(t||'').replace(/\s+/g,'').replace(/[（(][^）)]*[）)]/g,'').replace(/第\d+季|国语|粤语|高清|HD|正片|完结|全集/gi,'').toLowerCase();}
+async function findMatchingPlayable(src,name,episodeIndex){
+  const j=await sourceRequest(src,{ac:'list',wd:name,pg:1,pagesize:20});
+  const items=listOf(j);const norm=simplifiedTitle(name);
+  const match=items.find(x=>simplifiedTitle(pick(x,['vod_name','name','title']))===norm);
+  if(!match)return null;
+  const id=pick(match,['vod_id','id']);if(!id)return null;
+  const detailResp=await sourceRequest(src,{ac:'detail',ids:id});
+  const d=listOf(detailResp)[0];if(!d)return null;
+  const groups=parsePlayGroups(d);const eps=groups.length?groups[0].episodes:[];
+  const ep=eps[episodeIndex]||eps[0];
+  if(!ep||!isMediaUrl(ep.url)||!/^https?:\/\//i.test(ep.url))return null;
+  if(!(await probeVideoMetadata(ep.url,5500)))return null;
+  return {id,detail:d,episode:Math.min(episodeIndex,eps.length-1)};
+}
+async function handleFailedVideoSource(failedUrl){
+  if(failoverRunning||state.view!=='play')return;
+  const oldSource=currentSourceObject(),oldDetail=state.detail;
+  if(!oldSource||!oldDetail)return;
+  failoverRunning=true;
+  recordHealth(oldSource,false,'当前视频播放失败');
+  toast('当前源播放失败，正在寻找同名影片的可播放资源站');
+  try{
+    await refreshFallbackSources().catch(()=>{});
+    const name=pick(oldDetail,['vod_name','name','title'],'');
+    if(!name)throw new Error('缺少影片名称');
+    const other=[...state.sources,...state.fallbackSources].filter((x,i,a)=>healthId(x)!==healthId(oldSource)&&a.findIndex(y=>healthId(y)===healthId(x))===i);
+    for(const source of other){
+      if(state.view!=='play')return;
+      let health=lookupHealth(source);
+      if(health&&health.ok===false)continue;
+      if(!health){const ok=await verifyOneSource(source);if(!ok)continue;}
+      try{
+        const found=await findMatchingPlayable(source,name,state.episode||0);
+        if(!found)continue;
+        const mode=!!source.direct;
+        if(mode&&!state.sources.some(x=>healthId(x)===healthId(source))){state.sources=state.fallbackSources.slice();}
+        state.directMode=mode;state.sourceId=source.id;state.categories=[];
+        localStorage.removeItem(MANUAL_SOURCE_KEY);
+        localStorage.setItem(CACHE_PREFIX+(mode?'direct_source':'source'),String(source.id));
+        ++pageGeneration;destroyPlayer();
+        state.detail=found.detail;state.episode=found.episode;state.playGroupIndex=0;
+        renderSources();renderPlayer(found.detail,found.episode);
+        toast('已切换到通过播放检测的资源站：'+String(source.name||''));
+        return;
+      }catch(e){}
+    }
+    toast('没有找到可播放的同名影片，请稍后重试');
+    destroyPlayer();
+  }finally{failoverRunning=false;}
+}
+
+function vodCacheKey(p){let raw;try{raw=btoa(unescape(encodeURIComponent(JSON.stringify(p))))}catch(e){raw=JSON.stringify(p)}return 'vod_'+state.sourceId+'_'+raw.replace(/=+$/,'').slice(-80)}
+async function switchToFallbackAfterBackendFailure(){
+  // 此处切换的是“后台模式 -> 备用配置模式”，不是多个备用资源站之间自动换源。
+  await refreshFallbackSources();
+  if(!state.fallbackSources.length)throw new Error('后台资源站失效，且本地/远程备用 JSON 都无法读取');
+  const fb=fallbackBootstrap();
+  // 原后台线路锁定不应该阻止故障降级；备用列表选源仍完全手动。
+  try{const m=JSON.parse(localStorage.getItem(MANUAL_SOURCE_KEY)||'null');if(m&&!m.direct)localStorage.removeItem(MANUAL_SOURCE_KEY);}catch(e){}
+  setBoot(fb);
+  state.categories=[];
+  try{localStorage.removeItem(CACHE_PREFIX+'home_fast')}catch(e){}
+  toast('后台资源站不可用，已启用备用资源站');
+}
+async function vod(params,allowStale=true){
+  if(!state.sourceId)throw new Error('没有可用资源站，请点击换源');
+  let key=vodCacheKey(params);
+  const fresh=state.cacheEnabled?cacheGet(key,10*60*1000):null;
+  if(fresh)return fresh;
+  let j;
+  if(state.directMode){
+    // 备用模式：只请求用户选定的当前资源站，不轮询别的备用源。
+    j=await directVod(params);
+  }else{
+    try{
+      j=await api('vod',Object.assign({source:state.sourceId},params));
+      if(!hasUsefulVodData(j,params))throw new Error('后台资源站未返回有效数据');
+    }catch(e){
+      // 后台失联、源接口失效或返回坏数据时，允许自动启用本地/远程备用配置。
+      // 但不会静默选择第二、第三个备用资源站；其选择由用户控制。
+      await switchToFallbackAfterBackendFailure();
+      key=vodCacheKey(params);
+      j=await directVod(params);
+    }
   }
+  if(!hasUsefulVodData(j,params))throw new Error('当前资源站返回的数据无效');
+  if(state.cacheEnabled)cacheSet(key,j);
+  return j;
 }
 function listOf(j){if(Array.isArray(j))return j;return j&&((Array.isArray(j.list)&&j.list)||(j.data&&Array.isArray(j.data.list)&&j.data.list)||(Array.isArray(j.data)&&j.data))||[]}
 function classesOf(j){return j&&((Array.isArray(j.class)&&j.class)||(j.data&&Array.isArray(j.data.class)&&j.data.class))||[]}
@@ -885,22 +1027,18 @@ function bindContent(){
 }
 function renderAllCategories(){document.getElementById('allCategories').innerHTML=[{type_id:0,type_name:'首页'},...state.categories].map(c=>'<button class="cat" data-all-type="'+esc(pick(c,['type_id','id']))+'">'+esc(pick(c,['type_name','name']))+'</button>').join('');document.querySelectorAll('[data-all-type]').forEach(x=>x.onclick=()=>{modal('categoryModal',false);if(Number(x.dataset.allType)){pushRoute('category',{typeId:Number(x.dataset.allType),page:1,keyword:''});renderList(x.dataset.allType)}else{pushRoute('home');renderHome()}})}
 function renderSources(){
-  const list=(state.sources||[]).slice().sort((a,b)=>{
-    if(a.ok===false && b.ok!==false)return 1;
-    if(a.ok!==false && b.ok===false)return -1;
-    return (a.speed||999999)-(b.speed||999999);
-  });
+  const list=showHealthySources().slice();
   const box=document.getElementById('sourceList');
   if(!box)return;
   box.innerHTML=list.length?list.map((s,i)=>{
     const bad=s.ok===false;
     const text=bad?'✕ 暂不可用':(s.speed?('✓ '+s.speed+'ms'):(Number(s.id)===state.sourceId?'当前线路':'检测中'));
     return '<button class="source-item '+(Number(s.id)===state.sourceId?'active':'')+'" '+(bad?'data-status="error"':'')+' data-source="'+esc(s.id)+'"><span>'+esc(s.name||('线路'+(i+1)))+'</span><span>'+text+'</span></button>';
-  }).join(''):'<div class="empty">后台还没有添加资源站</div>';
+  }).join(''):'<div class="empty">暂无通过当天播放检测的资源站，请稍后重试</div>';
   document.querySelectorAll('[data-source]').forEach(x=>x.onclick=()=>{
     state.sourceId=Number(x.dataset.source);
     const chosen=(state.sources||[]).find(s=>Number(s.id)===state.sourceId);
-    state.directMode=!!(chosen&&sourceApiUrl(chosen));
+    state.directMode=!!(chosen&&chosen.direct);
     localStorage.setItem(MANUAL_SOURCE_KEY,JSON.stringify({id:state.sourceId,name:String(chosen&&chosen.name||''),url:sourceApiUrl(chosen)||'',direct:state.directMode}));
     ++pageGeneration; // 取消旧线路在途的页面请求
     localStorage.setItem(CACHE_PREFIX+(state.directMode?'direct_source':'source'),state.sourceId);
@@ -1151,7 +1289,7 @@ function startVideo(url){
     if(failed)return;
     failed=true;
     smartPlayFailed(url);
-    toast('当前播放地址失败，请手动选择线路或换源');
+    handleFailedVideoSource(url).catch(()=>toast('自动寻找备用播放源失败'));
   };
 
   if(window.Hls&&Hls.isSupported()&&/\.m3u8(?:$|\?)/i.test(url)){
@@ -1159,21 +1297,7 @@ function startVideo(url){
     state.hls.on(Hls.Events.ERROR,function(event,data){
       if(data&&data.fatal){
         smartPlayFailed(url);
-        if(data.type===Hls.ErrorTypes.NETWORK_ERROR){
-          try{
-            state.hls.startLoad();
-            toast('网络波动，正在恢复播放');
-            return;
-          }catch(e){}
-        }
-        if(data.type===Hls.ErrorTypes.MEDIA_ERROR){
-          try{
-            state.hls.recoverMediaError();
-            toast('正在恢复视频');
-            return;
-          }catch(e){}
-        }
-        toast('播放线路异常，请尝试换源');
+        handleFailedVideoSource(url).catch(()=>toast('播放失败，暂时无法切换备用资源站'));
       }
     });
     state.hls.loadSource(url);
@@ -1516,8 +1640,8 @@ function bindGlobal(){
 
 async function start(){
   const urlRef=new URLSearchParams(location.search).get('ref');if(urlRef){localStorage.setItem('video_pending_ref',urlRef.toUpperCase());}
-  bindGlobal();replaceRoute('home');state.backend=localStorage.getItem(CACHE_PREFIX+'backend')||'';startBackendRecovery();
-  try{await remoteConfig();await loadBootstrap();const pendingRef=localStorage.getItem('video_pending_ref');if(pendingRef){try{await api('ref_visit',{code:pendingRef,token:state.token||''})}catch(e){} }if(!state.directMode)await refreshMember();updateDesktopMemberButton();applyBottomNavSettings();if(!state.categories.length)await ensureCategories(null);renderHome();const s=state.boot.settings||{};if(String(s.announcement_enabled)==='1'&&s.announcement)setTimeout(()=>toast(s.announcement),600)}catch(e){const cached=cacheGet('boot',0);if(cached){setBoot(cached);renderHome();toast('后台暂时无法连接，使用本地缓存')}else app.innerHTML='<div class="empty">'+esc(e.message||'初始化失败')+'<br><button class="primary" onclick="location.reload()">重新加载</button></div>'}
+  bindGlobal();replaceRoute('home');state.backend=localStorage.getItem(CACHE_PREFIX+'backend')||'';/* 纯静态手动换源 */
+  try{await remoteConfig();await loadBootstrap();const pendingRef=localStorage.getItem('video_pending_ref');if(pendingRef){try{await api('ref_visit',{code:pendingRef,token:state.token||''})}catch(e){} }if(!state.directMode)await refreshMember();updateDesktopMemberButton();applyBottomNavSettings();if(!state.categories.length)await ensureCategories(null);renderHome();runDailySourceCheck().catch(()=>{});document.addEventListener('visibilitychange',()=>{if(!document.hidden)runDailySourceCheck().catch(()=>{});});const s=state.boot.settings||{};if(String(s.announcement_enabled)==='1'&&s.announcement)setTimeout(()=>toast(s.announcement),600)}catch(e){const cached=cacheGet('boot',0);if(cached){setBoot(cached);renderHome();toast('后台暂时无法连接，使用本地缓存')}else app.innerHTML='<div class="empty">'+esc(e.message||'初始化失败')+'<br><button class="primary" onclick="location.reload()">重新加载</button></div>'}
 }
 start();
 })();
